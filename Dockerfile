@@ -9,8 +9,8 @@ RUN apt-get -o Acquire::ForceIPv4=true update && \
     ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
-# Install yt-dlp globally so the API can process media
-RUN pip3 install --no-cache-dir yt-dlp
+# Fix python package restriction by adding --break-system-packages
+RUN pip3 install --no-cache-dir --break-system-packages yt-dlp
 
 WORKDIR /app
 

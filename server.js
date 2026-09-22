@@ -4,7 +4,6 @@ const { exec } = require('child_process');
 const util = require('util');
 const execPromise = util.promisify(exec);
 const yts = require('yt-search');
-const path = require('path');
 const fs = require('fs');
 
 const app = express();
@@ -20,7 +19,7 @@ if (!fs.existsSync('/tmp')) {
     fs.mkdirSync('/tmp', { recursive: true });
 }
 
-// Downloader Endpoint with client rotation applied to BOTH metadata & download
+// Universal Downloader Endpoint
 app.post('/download', async (req, res) => {
     const { url, type } = req.body; 
     if (!url) return res.status(400).json({ success: false, error: 'URL is required' });
@@ -28,28 +27,35 @@ app.post('/download', async (req, res) => {
     const fileId = Date.now();
     const outputTemplate = `/tmp/${fileId}_%(id)s.%(ext)s`;
 
-    const clients = ['android', 'mweb', 'web'];
+    const isYouTube = url.includes('youtube.com') || url.includes('youtu.be');
+    const clients = isYouTube ? ['android', 'web', 'mweb'] : [null]; 
+
     let success = false;
-    let videoTitle = 'KINGBOT Media';
-    let videoThumbnail = '';
+    let mediaTitle = 'KINGBOT Media';
+    let mediaThumbnail = '';
     let downloadedFile = null;
-    let lastError = null;
+    let lastError = '';
 
     for (const client of clients) {
         try {
-            // 1. Fetch metadata using the specific client
-            const metaCmd = `yt-dlp --dump-json --no-check-certificates --extractor-args "youtube:player_client=${client}" "${url}"`;
+            // FIXED: Removed inner quotes to prevent shell syntax crashes
+            const clientArg = client ? `--extractor-args youtube:player_client=${client}` : '';
+
+            // 1. Fetch metadata
+            const metaCmd = `yt-dlp --dump-json --no-check-certificates ${clientArg} "${url}"`;
             const { stdout: metaStdout } = await execPromise(metaCmd, { maxBuffer: 1024 * 1024 * 10 });
             const meta = JSON.parse(metaStdout);
-            videoTitle = meta.title || videoTitle;
-            videoThumbnail = meta.thumbnail || videoThumbnail;
+            mediaTitle = meta.title || meta.description || mediaTitle;
+            mediaThumbnail = meta.thumbnail || '';
 
-            // 2. Download using the exact same client to prevent 403 IP mismatch
+            // 2. Download file
             let dlCmd = '';
-            if (type === 'audio') {
-                dlCmd = `yt-dlp -x --audio-format mp3 --extractor-args "youtube:player_client=${client}" -o "${outputTemplate}" --no-check-certificates "${url}"`;
+            if (isYouTube && type === 'audio') {
+                dlCmd = `yt-dlp -x --audio-format mp3 ${clientArg} -o "${outputTemplate}" --no-check-certificates "${url}"`;
+            } else if (isYouTube) {
+                dlCmd = `yt-dlp -f "best[ext=mp4]/best" ${clientArg} -o "${outputTemplate}" --no-check-certificates "${url}"`;
             } else {
-                dlCmd = `yt-dlp -f "best[ext=mp4]/best" --extractor-args "youtube:player_client=${client}" -o "${outputTemplate}" --no-check-certificates "${url}"`;
+                dlCmd = `yt-dlp -o "${outputTemplate}" --no-check-certificates "${url}"`;
             }
 
             await execPromise(dlCmd, { maxBuffer: 1024 * 1024 * 50 });
@@ -62,14 +68,14 @@ app.post('/download', async (req, res) => {
                 break;
             }
         } catch (err) {
-            lastError = err.message;
+            lastError = err.stderr || err.message;
         }
     }
 
     if (!success || !downloadedFile) {
         return res.status(500).json({ 
             success: false, 
-            error: `Download failed: ${lastError || 'YouTube blocked the request (403)'}` 
+            error: `Download failed: ${lastError || 'Platform blocked the request'}` 
         });
     }
 
@@ -79,8 +85,8 @@ app.post('/download', async (req, res) => {
 
     res.json({
         success: true,
-        title: videoTitle,
-        thumbnail: videoThumbnail,
+        title: mediaTitle,
+        thumbnail: mediaThumbnail,
         downloadUrl: downloadUrl
     });
 });

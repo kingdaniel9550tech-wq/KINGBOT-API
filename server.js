@@ -12,14 +12,12 @@ const PORT = process.env.PORT || 3000;
 app.use(express.json());
 app.use(cors());
 
-// Serve downloaded media files statically from /tmp
 app.use('/media', express.static('/tmp'));
 
 if (!fs.existsSync('/tmp')) {
     fs.mkdirSync('/tmp', { recursive: true });
 }
 
-// Universal Downloader Endpoint
 app.post('/download', async (req, res) => {
     const { url, type } = req.body; 
     if (!url) return res.status(400).json({ success: false, error: 'URL is required' });
@@ -28,18 +26,19 @@ app.post('/download', async (req, res) => {
     const outputTemplate = `/tmp/${fileId}_%(id)s.%(ext)s`;
 
     const isYouTube = url.includes('youtube.com') || url.includes('youtu.be');
+    
+    // Use correct hyphenated yt-dlp syntax for player-client
     const clients = isYouTube ? ['android', 'web', 'mweb'] : [null]; 
 
     let success = false;
     let mediaTitle = 'KINGBOT Media';
     let mediaThumbnail = '';
     let downloadedFile = null;
-    let lastError = '';
+    let detailedError = '';
 
     for (const client of clients) {
         try {
-            // FIXED: Removed inner quotes to prevent shell syntax crashes
-            const clientArg = client ? `--extractor-args youtube:player_client=${client}` : '';
+            const clientArg = client ? `--extractor-args youtube:player-client=${client}` : '';
 
             // 1. Fetch metadata
             const metaCmd = `yt-dlp --dump-json --no-check-certificates ${clientArg} "${url}"`;
@@ -68,14 +67,14 @@ app.post('/download', async (req, res) => {
                 break;
             }
         } catch (err) {
-            lastError = err.stderr || err.message;
+            detailedError = err.stderr || err.message;
         }
     }
 
     if (!success || !downloadedFile) {
         return res.status(500).json({ 
             success: false, 
-            error: `Download failed: ${lastError || 'Platform blocked the request'}` 
+            error: detailedError || 'Unknown download failure' 
         });
     }
 
@@ -91,7 +90,6 @@ app.post('/download', async (req, res) => {
     });
 });
 
-// YouTube Search Endpoint
 app.get('/search', async (req, res) => {
     const query = req.query.q;
     if (!query) return res.status(400).json({ success: false, error: 'Query is required' });

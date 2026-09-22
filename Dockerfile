@@ -1,4 +1,4 @@
-FROM node:18-slim
+FROM node:20-slim
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -9,7 +9,7 @@ RUN apt-get -o Acquire::ForceIPv4=true update && \
     ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
-# Download yt-dlp binary directly (Bypasses all pip/python errors!)
+# Download yt-dlp binary directly
 RUN curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp && \
     chmod a+rx /usr/local/bin/yt-dlp
 

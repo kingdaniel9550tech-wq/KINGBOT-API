@@ -1,8 +1,8 @@
 const express = require('express');
 const cors = require('cors');
-const { exec } = require('child_process');
+const { execFile } = require('child_process');
 const util = require('util');
-const execPromise = util.promisify(exec);
+const execFilePromise = util.promisify(execFile);
 const yts = require('yt-search');
 const fs = require('fs');
 
@@ -12,84 +12,77 @@ const PORT = process.env.PORT || 3000;
 app.use(express.json());
 app.use(cors());
 
+// Serve downloaded media files statically from /tmp
 app.use('/media', express.static('/tmp'));
 
 if (!fs.existsSync('/tmp')) {
     fs.mkdirSync('/tmp', { recursive: true });
 }
 
+// Universal Downloader Endpoint using direct execFile (No shell quotation bugs)
 app.post('/download', async (req, res) => {
     const { url, type } = req.body; 
     if (!url) return res.status(400).json({ success: false, error: 'URL is required' });
 
     const fileId = Date.now();
     const outputTemplate = `/tmp/${fileId}_%(id)s.%(ext)s`;
-
     const isYouTube = url.includes('youtube.com') || url.includes('youtu.be');
-    
-    // Use correct hyphenated yt-dlp syntax for player-client
-    const clients = isYouTube ? ['android', 'web', 'mweb'] : [null]; 
 
-    let success = false;
-    let mediaTitle = 'KINGBOT Media';
-    let mediaThumbnail = '';
-    let downloadedFile = null;
-    let detailedError = '';
-
-    for (const client of clients) {
-        try {
-            const clientArg = client ? `--extractor-args youtube:player-client=${client}` : '';
-
-            // 1. Fetch metadata
-            const metaCmd = `yt-dlp --dump-json --no-check-certificates ${clientArg} "${url}"`;
-            const { stdout: metaStdout } = await execPromise(metaCmd, { maxBuffer: 1024 * 1024 * 10 });
-            const meta = JSON.parse(metaStdout);
-            mediaTitle = meta.title || meta.description || mediaTitle;
-            mediaThumbnail = meta.thumbnail || '';
-
-            // 2. Download file
-            let dlCmd = '';
-            if (isYouTube && type === 'audio') {
-                dlCmd = `yt-dlp -x --audio-format mp3 ${clientArg} -o "${outputTemplate}" --no-check-certificates "${url}"`;
-            } else if (isYouTube) {
-                dlCmd = `yt-dlp -f "best[ext=mp4]/best" ${clientArg} -o "${outputTemplate}" --no-check-certificates "${url}"`;
-            } else {
-                dlCmd = `yt-dlp -o "${outputTemplate}" --no-check-certificates "${url}"`;
-            }
-
-            await execPromise(dlCmd, { maxBuffer: 1024 * 1024 * 50 });
-
-            const files = fs.readdirSync('/tmp');
-            downloadedFile = files.find(f => f.startsWith(`${fileId}_`));
-
-            if (downloadedFile) {
-                success = true;
-                break;
-            }
-        } catch (err) {
-            detailedError = err.stderr || err.message;
+    try {
+        // 1. Fetch metadata safely
+        const metaArgs = ['--no-check-certificates', '--dump-json', url];
+        if (isYouTube) {
+            metaArgs.push('--extractor-args', 'youtube:player_client=android');
         }
-    }
 
-    if (!success || !downloadedFile) {
-        return res.status(500).json({ 
+        const { stdout } = await execFilePromise('yt-dlp', metaArgs, { maxBuffer: 1024 * 1024 * 10 });
+        const meta = JSON.parse(stdout);
+        const mediaTitle = meta.title || meta.description || 'KINGBOT Media';
+        const mediaThumbnail = meta.thumbnail || '';
+
+        // 2. Download file safely
+        let dlArgs = [];
+        if (isYouTube) {
+            if (type === 'audio') {
+                dlArgs = ['-x', '--audio-format', 'mp3', '--extractor-args', 'youtube:player_client=android', '-o', outputTemplate, '--no-check-certificates', url];
+            } else {
+                dlArgs = ['-f', 'best[ext=mp4]/best', '--extractor-args', 'youtube:player_client=android', '-o', outputTemplate, '--no-check-certificates', url];
+            }
+        } else {
+            // Universal handler for TikTok, Audiomack, Instagram, etc.
+            dlArgs = ['-o', outputTemplate, '--no-check-certificates', url];
+        }
+
+        await execFilePromise('yt-dlp', dlArgs, { maxBuffer: 1024 * 1024 * 50 });
+
+        const files = fs.readdirSync('/tmp');
+        const downloadedFile = files.find(f => f.startsWith(`${fileId}_`));
+
+        if (!downloadedFile) {
+            return res.status(500).json({ success: false, error: 'File generation failed on server' });
+        }
+
+        const host = req.get('host');
+        const protocol = req.protocol;
+        const downloadUrl = `${protocol}://${host}/media/${downloadedFile}`;
+
+        res.json({
+            success: true,
+            title: mediaTitle,
+            thumbnail: mediaThumbnail,
+            downloadUrl: downloadUrl
+        });
+
+    } catch (err) {
+        console.error('Download Error:', err);
+        res.status(500).json({ 
             success: false, 
-            error: detailedError || 'Unknown download failure' 
+            error: err.stderr || err.message || 'Unknown download failure' 
         });
     }
-
-    const host = req.get('host');
-    const protocol = req.protocol;
-    const downloadUrl = `${protocol}://${host}/media/${downloadedFile}`;
-
-    res.json({
-        success: true,
-        title: mediaTitle,
-        thumbnail: mediaThumbnail,
-        downloadUrl: downloadUrl
-    });
 });
 
+// YouTube Search Endpoint
 app.get('/search', async (req, res) => {
     const query = req.query.q;
     if (!query) return res.status(400).json({ success: false, error: 'Query is required' });

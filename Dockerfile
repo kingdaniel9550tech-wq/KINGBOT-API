@@ -2,7 +2,8 @@ FROM node:18-slim
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get -o Acquire::ForceIPv4=true update && \
+    apt-get -o Acquire::ForceIPv4=true install -y --no-install-recommends \
     python3 \
     ffmpeg \
     && rm -rf /var/lib/apt/lists/*

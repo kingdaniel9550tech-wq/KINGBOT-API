@@ -4,6 +4,8 @@ const { exec } = require('child_process');
 const util = require('util');
 const execPromise = util.promisify(exec);
 const yts = require('yt-search');
+const path = require('path');
+const fs = require('fs');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -11,55 +13,67 @@ const PORT = process.env.PORT || 3000;
 app.use(express.json());
 app.use(cors());
 
-// Universal Downloader Endpoint using Native yt-dlp Binary
+// Serve downloaded media files statically from /tmp
+app.use('/media', express.static('/tmp'));
+
+// Ensure /tmp directory exists
+if (!fs.existsSync('/tmp')) {
+    fs.mkdirSync('/tmp', { recursive: true });
+}
+
+// Downloader Endpoint: Downloads locally on server to bypass YouTube 403 IP mismatch
 app.post('/download', async (req, res) => {
     const { url, type } = req.body; 
     if (!url) return res.status(400).json({ success: false, error: 'URL is required' });
 
-    // Rotate through mobile and web clients to bypass restrictions
-    const clients = ['android', 'ios', 'mweb', 'web'];
-    let outputData = null;
-    let lastError = null;
+    const fileId = Date.now();
+    const outputTemplate = `/tmp/${fileId}_%(id)s.%(ext)s`;
 
-    for (const client of clients) {
-        try {
-            const cmd = `yt-dlp --dump-json --no-check-certificates --prefer-free-formats --extractor-args "youtube:player_client=${client}" "${url}"`;
-            const { stdout } = await execPromise(cmd, { maxBuffer: 1024 * 1024 * 10 });
-            outputData = JSON.parse(stdout);
-            if (outputData) break;
-        } catch (err) {
-            lastError = err.message;
-        }
+    let videoTitle = 'KINGBOT Media';
+    let videoThumbnail = '';
+
+    // Fetch metadata first
+    try {
+        const { stdout } = await execPromise(`yt-dlp --dump-json --no-check-certificates "${url}"`);
+        const meta = JSON.parse(stdout);
+        videoTitle = meta.title || videoTitle;
+        videoThumbnail = meta.thumbnail || videoThumbnail;
+    } catch (e) {
+        // Fallback if metadata fetch fails
     }
 
-    if (!outputData) {
-        return res.status(500).json({ 
-            success: false, 
-            error: `Download failed: ${lastError || 'YouTube blocked the request'}` 
-        });
+    // Download file locally using yt-dlp
+    let cmd = '';
+    if (type === 'audio') {
+        cmd = `yt-dlp -x --audio-format mp3 -o "${outputTemplate}" --no-check-certificates "${url}"`;
+    } else {
+        cmd = `yt-dlp -f "best[ext=mp4]/best" -o "${outputTemplate}" --no-check-certificates "${url}"`;
     }
 
     try {
-        let mediaUrl = '';
-        if (type === 'audio') {
-            const audioFormat = outputData.formats?.reverse().find(f => f.acodec !== 'none' && f.vcodec === 'none');
-            mediaUrl = audioFormat ? audioFormat.url : outputData.url;
-        } else {
-            const videoFormat = outputData.formats?.reverse().find(f => f.vcodec !== 'none' && f.acodec !== 'none' && f.ext === 'mp4');
-            mediaUrl = videoFormat ? videoFormat.url : (outputData.url || outputData.formats?.[0]?.url);
+        await execPromise(cmd, { maxBuffer: 1024 * 1024 * 50 });
+
+        // Find the generated file in /tmp
+        const files = fs.readdirSync('/tmp');
+        const downloadedFile = files.find(f => f.startsWith(`${fileId}_`));
+
+        if (!downloadedFile) {
+            return res.status(500).json({ success: false, error: 'File download failed on server' });
         }
 
-        if (!mediaUrl) mediaUrl = outputData.url;
+        const host = req.get('host');
+        const protocol = req.protocol;
+        const downloadUrl = `${protocol}://${host}/media/${downloadedFile}`;
 
         res.json({
             success: true,
-            title: outputData.title || 'KINGBOT Media',
-            thumbnail: outputData.thumbnail || '',
-            downloadUrl: mediaUrl
+            title: videoTitle,
+            thumbnail: videoThumbnail,
+            downloadUrl: downloadUrl
         });
 
     } catch (err) {
-        res.status(500).json({ success: false, error: err.message });
+        res.status(500).json({ success: false, error: `Download failed: ${err.message}` });
     }
 });
 

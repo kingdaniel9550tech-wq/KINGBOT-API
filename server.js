@@ -16,12 +16,11 @@ app.use(cors());
 // Serve downloaded media files statically from /tmp
 app.use('/media', express.static('/tmp'));
 
-// Ensure /tmp directory exists
 if (!fs.existsSync('/tmp')) {
     fs.mkdirSync('/tmp', { recursive: true });
 }
 
-// Downloader Endpoint: Downloads locally on server to bypass YouTube 403 IP mismatch
+// Downloader Endpoint with client rotation applied to BOTH metadata & download
 app.post('/download', async (req, res) => {
     const { url, type } = req.body; 
     if (!url) return res.status(400).json({ success: false, error: 'URL is required' });
@@ -29,52 +28,61 @@ app.post('/download', async (req, res) => {
     const fileId = Date.now();
     const outputTemplate = `/tmp/${fileId}_%(id)s.%(ext)s`;
 
+    const clients = ['android', 'mweb', 'web'];
+    let success = false;
     let videoTitle = 'KINGBOT Media';
     let videoThumbnail = '';
+    let downloadedFile = null;
+    let lastError = null;
 
-    // Fetch metadata first
-    try {
-        const { stdout } = await execPromise(`yt-dlp --dump-json --no-check-certificates "${url}"`);
-        const meta = JSON.parse(stdout);
-        videoTitle = meta.title || videoTitle;
-        videoThumbnail = meta.thumbnail || videoThumbnail;
-    } catch (e) {
-        // Fallback if metadata fetch fails
-    }
+    for (const client of clients) {
+        try {
+            // 1. Fetch metadata using the specific client
+            const metaCmd = `yt-dlp --dump-json --no-check-certificates --extractor-args "youtube:player_client=${client}" "${url}"`;
+            const { stdout: metaStdout } = await execPromise(metaCmd, { maxBuffer: 1024 * 1024 * 10 });
+            const meta = JSON.parse(metaStdout);
+            videoTitle = meta.title || videoTitle;
+            videoThumbnail = meta.thumbnail || videoThumbnail;
 
-    // Download file locally using yt-dlp
-    let cmd = '';
-    if (type === 'audio') {
-        cmd = `yt-dlp -x --audio-format mp3 -o "${outputTemplate}" --no-check-certificates "${url}"`;
-    } else {
-        cmd = `yt-dlp -f "best[ext=mp4]/best" -o "${outputTemplate}" --no-check-certificates "${url}"`;
-    }
+            // 2. Download using the exact same client to prevent 403 IP mismatch
+            let dlCmd = '';
+            if (type === 'audio') {
+                dlCmd = `yt-dlp -x --audio-format mp3 --extractor-args "youtube:player_client=${client}" -o "${outputTemplate}" --no-check-certificates "${url}"`;
+            } else {
+                dlCmd = `yt-dlp -f "best[ext=mp4]/best" --extractor-args "youtube:player_client=${client}" -o "${outputTemplate}" --no-check-certificates "${url}"`;
+            }
 
-    try {
-        await execPromise(cmd, { maxBuffer: 1024 * 1024 * 50 });
+            await execPromise(dlCmd, { maxBuffer: 1024 * 1024 * 50 });
 
-        // Find the generated file in /tmp
-        const files = fs.readdirSync('/tmp');
-        const downloadedFile = files.find(f => f.startsWith(`${fileId}_`));
+            const files = fs.readdirSync('/tmp');
+            downloadedFile = files.find(f => f.startsWith(`${fileId}_`));
 
-        if (!downloadedFile) {
-            return res.status(500).json({ success: false, error: 'File download failed on server' });
+            if (downloadedFile) {
+                success = true;
+                break;
+            }
+        } catch (err) {
+            lastError = err.message;
         }
-
-        const host = req.get('host');
-        const protocol = req.protocol;
-        const downloadUrl = `${protocol}://${host}/media/${downloadedFile}`;
-
-        res.json({
-            success: true,
-            title: videoTitle,
-            thumbnail: videoThumbnail,
-            downloadUrl: downloadUrl
-        });
-
-    } catch (err) {
-        res.status(500).json({ success: false, error: `Download failed: ${err.message}` });
     }
+
+    if (!success || !downloadedFile) {
+        return res.status(500).json({ 
+            success: false, 
+            error: `Download failed: ${lastError || 'YouTube blocked the request (403)'}` 
+        });
+    }
+
+    const host = req.get('host');
+    const protocol = req.protocol;
+    const downloadUrl = `${protocol}://${host}/media/${downloadedFile}`;
+
+    res.json({
+        success: true,
+        title: videoTitle,
+        thumbnail: videoThumbnail,
+        downloadUrl: downloadUrl
+    });
 });
 
 // YouTube Search Endpoint

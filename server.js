@@ -9,35 +9,53 @@ const PORT = process.env.PORT || 3000;
 app.use(express.json());
 app.use(cors());
 
-// Universal Downloader Endpoint with YouTube Bot Bypass Flags
+// Universal Downloader Endpoint with Multi-Client Cloud Bypass
 app.post('/download', async (req, res) => {
     const { url, type } = req.body; 
     if (!url) return res.status(400).json({ success: false, error: 'URL is required' });
 
-    try {
-        console.log(`[API] Processing URL: ${url} | Type: ${type}`);
+    // Rotate through different client profiles to avoid YouTube cloud blocks
+    const clients = ['android', 'ios', 'web'];
+    let output = null;
+    let lastError = null;
 
-        const flags = {
-            dumpSingleJson: true,
-            noCheckCertificates: true,
-            noWarnings: true,
-            preferFreeFormats: true,
-            // Bypass YouTube bot detection blocks on cloud servers
-            extractorArgs: 'youtube:player_client=android,web',
-            addHeader: [
-                'user-agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'referer:https://www.google.com'
-            ]
-        };
+    for (const client of clients) {
+        try {
+            const flags = {
+                dumpSingleJson: true,
+                noCheckCertificates: true,
+                noWarnings: true,
+                preferFreeFormats: true,
+                extractorArgs: `youtube:player_client=${client}`,
+                addHeader: [
+                    'user-agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    'referer:https://www.youtube.com'
+                ]
+            };
 
-        if (type === 'audio') {
-            flags.extractAudio = true;
-            flags.audioFormat = 'mp3';
+            if (type === 'audio') {
+                flags.extractAudio = true;
+                flags.audioFormat = 'mp3';
+            }
+
+            output = await youtubedl(url, flags);
+            if (output && (output.url || output.formats)) {
+                break; // Successful extraction
+            }
+        } catch (err) {
+            lastError = err.message;
         }
+    }
 
-        const output = await youtubedl(url, flags);
+    if (!output) {
+        return res.status(500).json({ 
+            success: false, 
+            error: `Extraction failed: ${lastError || 'YouTube blocked server IP'}` 
+        });
+    }
+
+    try {
         let mediaUrl = '';
-
         if (type === 'audio') {
             const audioFormat = output.formats?.reverse().find(f => f.acodec !== 'none' && f.vcodec === 'none');
             mediaUrl = audioFormat ? audioFormat.url : output.url;
@@ -46,9 +64,7 @@ app.post('/download', async (req, res) => {
             mediaUrl = videoFormat ? videoFormat.url : (output.url || output.formats?.[0]?.url);
         }
 
-        if (!mediaUrl) {
-            throw new Error('Could not extract a direct media stream URL.');
-        }
+        if (!mediaUrl) mediaUrl = output.url;
 
         res.json({
             success: true,
@@ -58,8 +74,7 @@ app.post('/download', async (req, res) => {
         });
 
     } catch (err) {
-        console.error('[API Error]:', err.message);
-        res.status(500).json({ success: false, error: err.message || 'Internal Server Error' });
+        res.status(500).json({ success: false, error: err.message });
     }
 });
 
@@ -81,7 +96,6 @@ app.get('/search', async (req, res) => {
             duration: video.timestamp
         });
     } catch (err) {
-        console.error('[Search Error]:', err.message);
         res.status(500).json({ success: false, error: err.message });
     }
 });

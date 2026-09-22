@@ -9,13 +9,13 @@ const PORT = process.env.PORT || 3000;
 app.use(express.json());
 app.use(cors());
 
-// Universal Downloader Endpoint with Multi-Client Cloud Bypass
+// Universal Downloader Endpoint with 403 Bypass & Client Rotation
 app.post('/download', async (req, res) => {
     const { url, type } = req.body; 
     if (!url) return res.status(400).json({ success: false, error: 'URL is required' });
 
-    // Rotate through different client profiles to avoid YouTube cloud blocks
-    const clients = ['android', 'ios', 'web'];
+    // Rotate through mobile and web clients to bypass 403 blocks
+    const clients = ['mweb', 'android', 'web'];
     let output = null;
     let lastError = null;
 
@@ -28,7 +28,7 @@ app.post('/download', async (req, res) => {
                 preferFreeFormats: true,
                 extractorArgs: `youtube:player_client=${client}`,
                 addHeader: [
-                    'user-agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    'user-agent: Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1',
                     'referer:https://www.youtube.com'
                 ]
             };
@@ -40,7 +40,7 @@ app.post('/download', async (req, res) => {
 
             output = await youtubedl(url, flags);
             if (output && (output.url || output.formats)) {
-                break; // Successful extraction
+                break; // Successfully bypassed block
             }
         } catch (err) {
             lastError = err.message;
@@ -50,7 +50,7 @@ app.post('/download', async (req, res) => {
     if (!output) {
         return res.status(500).json({ 
             success: false, 
-            error: `Extraction failed: ${lastError || 'YouTube blocked server IP'}` 
+            error: `403 Bypass Failed: ${lastError || 'Stream restricted by YouTube'}` 
         });
     }
 

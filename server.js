@@ -1,6 +1,8 @@
 const express = require('express');
 const cors = require('cors');
-const youtubedl = require('youtube-dl-exec');
+const { exec } = require('child_process');
+const util = require('util');
+const execPromise = util.promisify(exec);
 const yts = require('yt-search');
 
 const app = express();
@@ -9,67 +11,50 @@ const PORT = process.env.PORT || 3000;
 app.use(express.json());
 app.use(cors());
 
-// Universal Downloader Endpoint with 403 Bypass & Client Rotation
+// Universal Downloader Endpoint using Native yt-dlp Binary
 app.post('/download', async (req, res) => {
     const { url, type } = req.body; 
     if (!url) return res.status(400).json({ success: false, error: 'URL is required' });
 
-    // Rotate through mobile and web clients to bypass 403 blocks
-    const clients = ['mweb', 'android', 'web'];
-    let output = null;
+    // Rotate through mobile and web clients to bypass restrictions
+    const clients = ['android', 'ios', 'mweb', 'web'];
+    let outputData = null;
     let lastError = null;
 
     for (const client of clients) {
         try {
-            const flags = {
-                dumpSingleJson: true,
-                noCheckCertificates: true,
-                noWarnings: true,
-                preferFreeFormats: true,
-                extractorArgs: `youtube:player_client=${client}`,
-                addHeader: [
-                    'user-agent: Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1',
-                    'referer:https://www.youtube.com'
-                ]
-            };
-
-            if (type === 'audio') {
-                flags.extractAudio = true;
-                flags.audioFormat = 'mp3';
-            }
-
-            output = await youtubedl(url, flags);
-            if (output && (output.url || output.formats)) {
-                break; // Successfully bypassed block
-            }
+            const cmd = `yt-dlp --dump-json --no-check-certificates --prefer-free-formats --extractor-args "youtube:player_client=${client}" "${url}"`;
+            const { stdout } = await execPromise(cmd, { maxBuffer: 1024 * 1024 * 10 });
+            outputData = JSON.parse(stdout);
+            if (outputData) break;
         } catch (err) {
             lastError = err.message;
         }
     }
 
-    if (!output) {
+    if (!outputData) {
         return res.status(500).json({ 
             success: false, 
-            error: `403 Bypass Failed: ${lastError || 'Stream restricted by YouTube'}` 
+            error: `Download failed: ${lastError || 'YouTube blocked the request'}` 
         });
     }
 
     try {
         let mediaUrl = '';
         if (type === 'audio') {
-            const audioFormat = output.formats?.reverse().find(f => f.acodec !== 'none' && f.vcodec === 'none');
-            mediaUrl = audioFormat ? audioFormat.url : output.url;
+            const audioFormat = outputData.formats?.reverse().find(f => f.acodec !== 'none' && f.vcodec === 'none');
+            mediaUrl = audioFormat ? audioFormat.url : outputData.url;
         } else {
-            const videoFormat = output.formats?.reverse().find(f => f.vcodec !== 'none' && f.acodec !== 'none' && f.ext === 'mp4');
-            mediaUrl = videoFormat ? videoFormat.url : (output.url || output.formats?.[0]?.url);
+            const videoFormat = outputData.formats?.reverse().find(f => f.vcodec !== 'none' && f.acodec !== 'none' && f.ext === 'mp4');
+            mediaUrl = videoFormat ? videoFormat.url : (outputData.url || outputData.formats?.[0]?.url);
         }
 
-        if (!mediaUrl) mediaUrl = output.url;
+        if (!mediaUrl) mediaUrl = outputData.url;
 
         res.json({
             success: true,
-            title: output.title || 'KINGBOT Media',
-            thumbnail: output.thumbnail || '',
+            title: outputData.title || 'KINGBOT Media',
+            thumbnail: outputData.thumbnail || '',
             downloadUrl: mediaUrl
         });
 

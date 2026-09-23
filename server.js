@@ -19,10 +19,12 @@ if (!fs.existsSync('/tmp')) {
     fs.mkdirSync('/tmp', { recursive: true });
 }
 
-// Universal Downloader Endpoint using direct execFile (No shell quotation bugs)
+// Universal Downloader Endpoint
 app.post('/download', async (req, res) => {
     const { url, type } = req.body; 
-    if (!url) return res.status(400).json({ success: false, error: 'URL is required' });
+    if (!url) {
+        return res.status(200).json({ success: false, error: 'URL is required' });
+    }
 
     const fileId = Date.now();
     const outputTemplate = `/tmp/${fileId}_%(id)s.%(ext)s`;
@@ -49,7 +51,6 @@ app.post('/download', async (req, res) => {
                 dlArgs = ['-f', 'best[ext=mp4]/best', '--extractor-args', 'youtube:player_client=android', '-o', outputTemplate, '--no-check-certificates', url];
             }
         } else {
-            // Universal handler for TikTok, Audiomack, Instagram, etc.
             dlArgs = ['-o', outputTemplate, '--no-check-certificates', url];
         }
 
@@ -59,7 +60,7 @@ app.post('/download', async (req, res) => {
         const downloadedFile = files.find(f => f.startsWith(`${fileId}_`));
 
         if (!downloadedFile) {
-            return res.status(500).json({ success: false, error: 'File generation failed on server' });
+            return res.status(200).json({ success: false, error: 'File generation failed: File not found in /tmp' });
         }
 
         const host = req.get('host');
@@ -75,9 +76,11 @@ app.post('/download', async (req, res) => {
 
     } catch (err) {
         console.error('Download Error:', err);
-        res.status(500).json({ 
+        // Send status 200 with the exact error message so WhatsApp displays it instead of code 500
+        const exactError = err.stderr || err.message || 'Unknown server execution error';
+        res.status(200).json({ 
             success: false, 
-            error: err.stderr || err.message || 'Unknown download failure' 
+            error: exactError.trim()
         });
     }
 });
@@ -85,12 +88,12 @@ app.post('/download', async (req, res) => {
 // YouTube Search Endpoint
 app.get('/search', async (req, res) => {
     const query = req.query.q;
-    if (!query) return res.status(400).json({ success: false, error: 'Query is required' });
+    if (!query) return res.status(200).json({ success: false, error: 'Query is required' });
 
     try {
         const searchResult = await yts(query);
         const video = searchResult.videos[0];
-        if (!video) return res.status(404).json({ success: false, error: 'No results found' });
+        if (!video) return res.status(200).json({ success: false, error: 'No results found' });
 
         res.json({
             success: true,
@@ -100,7 +103,7 @@ app.get('/search', async (req, res) => {
             duration: video.timestamp
         });
     } catch (err) {
-        res.status(500).json({ success: false, error: err.message });
+        res.status(200).json({ success: false, error: err.message });
     }
 });
 

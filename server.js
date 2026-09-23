@@ -8,7 +8,7 @@ const PORT = process.env.PORT || 3000;
 app.use(express.json());
 app.use(cors());
 
-// Universal Downloader Endpoint using the official Cobalt API
+// Universal Downloader Endpoint
 app.post('/download', async (req, res) => {
     const { url, type } = req.body; 
     if (!url) {
@@ -21,7 +21,7 @@ app.post('/download', async (req, res) => {
             headers: {
                 'Accept': 'application/json',
                 'Content-Type': 'application/json',
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                'User-Agent': 'Mozilla/5.0'
             },
             body: JSON.stringify({
                 url: url,

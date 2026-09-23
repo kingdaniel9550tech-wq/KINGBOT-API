@@ -1,7 +1,7 @@
 {
   "name": "kingbot-api",
   "version": "1.0.0",
-  "description": "Kingbot downloader API",
+  "description": "Kingbot Media Downloader API",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
@@ -9,7 +9,6 @@
   "dependencies": {
     "cors": "^2.8.5",
     "express": "^4.19.2",
-    "youtube-dl-exec": "^2.5.8",
     "yt-search": "^2.11.0"
   }
 }

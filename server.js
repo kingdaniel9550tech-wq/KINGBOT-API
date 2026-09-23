@@ -20,7 +20,7 @@ if (!fs.existsSync('/tmp')) {
     fs.mkdirSync('/tmp', { recursive: true });
 }
 
-// Downloader Endpoint with client rotation applied to BOTH metadata & download
+// Multi-Platform Downloader Endpoint (YouTube, TikTok, Facebook, Instagram, Audiomack, etc.)
 app.post('/download', async (req, res) => {
     const { url, type } = req.body; 
     if (!url) return res.status(400).json({ success: false, error: 'URL is required' });
@@ -28,28 +28,59 @@ app.post('/download', async (req, res) => {
     const fileId = Date.now();
     const outputTemplate = `/tmp/${fileId}_%(id)s.%(ext)s`;
 
-    const clients = ['android', 'mweb', 'web'];
     let success = false;
     let videoTitle = 'KINGBOT Media';
     let videoThumbnail = '';
     let downloadedFile = null;
     let lastError = null;
 
-    for (const client of clients) {
+    const isYouTube = url.includes('youtube.com') || url.includes('youtu.be');
+
+    if (isYouTube) {
+        // 1. YouTube Client Rotation Logic to bypass bot blocks
+        const clients = ['android', 'mweb', 'web'];
+        for (const client of clients) {
+            try {
+                const metaCmd = `yt-dlp --dump-json --no-check-certificates --extractor-args "youtube:player_client=${client}" "${url}"`;
+                const { stdout: metaStdout } = await execPromise(metaCmd, { maxBuffer: 1024 * 1024 * 10 });
+                const meta = JSON.parse(metaStdout);
+                videoTitle = meta.title || videoTitle;
+                videoThumbnail = meta.thumbnail || videoThumbnail;
+
+                let dlCmd = '';
+                if (type === 'audio') {
+                    dlCmd = `yt-dlp -x --audio-format mp3 --extractor-args "youtube:player_client=${client}" -o "${outputTemplate}" --no-check-certificates "${url}"`;
+                } else {
+                    dlCmd = `yt-dlp -f "best[ext=mp4]/best" --extractor-args "youtube:player_client=${client}" -o "${outputTemplate}" --no-check-certificates "${url}"`;
+                }
+
+                await execPromise(dlCmd, { maxBuffer: 1024 * 1024 * 50 });
+
+                const files = fs.readdirSync('/tmp');
+                downloadedFile = files.find(f => f.startsWith(`${fileId}_`));
+
+                if (downloadedFile) {
+                    success = true;
+                    break;
+                }
+            } catch (err) {
+                lastError = err.message;
+            }
+        }
+    } else {
+        // 2. Multi-Platform Logic for TikTok, Facebook, Instagram, Audiomack, etc.
         try {
-            // 1. Fetch metadata using the specific client
-            const metaCmd = `yt-dlp --dump-json --no-check-certificates --extractor-args "youtube:player_client=${client}" "${url}"`;
+            const metaCmd = `yt-dlp --dump-json --no-check-certificates "${url}"`;
             const { stdout: metaStdout } = await execPromise(metaCmd, { maxBuffer: 1024 * 1024 * 10 });
             const meta = JSON.parse(metaStdout);
-            videoTitle = meta.title || videoTitle;
+            videoTitle = meta.title || meta.description || videoTitle;
             videoThumbnail = meta.thumbnail || videoThumbnail;
 
-            // 2. Download using the exact same client to prevent 403 IP mismatch
             let dlCmd = '';
             if (type === 'audio') {
-                dlCmd = `yt-dlp -x --audio-format mp3 --extractor-args "youtube:player_client=${client}" -o "${outputTemplate}" --no-check-certificates "${url}"`;
+                dlCmd = `yt-dlp -x --audio-format mp3 -o "${outputTemplate}" --no-check-certificates "${url}"`;
             } else {
-                dlCmd = `yt-dlp -f "best[ext=mp4]/best" --extractor-args "youtube:player_client=${client}" -o "${outputTemplate}" --no-check-certificates "${url}"`;
+                dlCmd = `yt-dlp -f "best[ext=mp4]/best/best" -o "${outputTemplate}" --no-check-certificates "${url}"`;
             }
 
             await execPromise(dlCmd, { maxBuffer: 1024 * 1024 * 50 });
@@ -59,7 +90,6 @@ app.post('/download', async (req, res) => {
 
             if (downloadedFile) {
                 success = true;
-                break;
             }
         } catch (err) {
             lastError = err.message;
@@ -69,7 +99,7 @@ app.post('/download', async (req, res) => {
     if (!success || !downloadedFile) {
         return res.status(500).json({ 
             success: false, 
-            error: `Download failed: ${lastError || 'YouTube blocked the request (403)'}` 
+            error: `Download failed: ${lastError || 'Platform blocked the request'}` 
         });
     }
 

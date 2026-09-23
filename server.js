@@ -1,10 +1,6 @@
 const express = require('express');
 const cors = require('cors');
-const { execFile } = require('child_process');
-const util = require('util');
-const execFilePromise = util.promisify(execFile);
 const yts = require('yt-search');
-const fs = require('fs');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -12,74 +8,48 @@ const PORT = process.env.PORT || 3000;
 app.use(express.json());
 app.use(cors());
 
-// Serve downloaded media files statically from /tmp
-app.use('/media', express.static('/tmp'));
-
-if (!fs.existsSync('/tmp')) {
-    fs.mkdirSync('/tmp', { recursive: true });
-}
-
-// Universal Downloader Endpoint
+// Universal Downloader Endpoint using Public API (No yt-dlp / cookies needed)
 app.post('/download', async (req, res) => {
     const { url, type } = req.body; 
     if (!url) {
         return res.status(200).json({ success: false, error: 'URL is required' });
     }
 
-    const fileId = Date.now();
-    const outputTemplate = `/tmp/${fileId}_%(id)s.%(ext)s`;
-    const isYouTube = url.includes('youtube.com') || url.includes('youtu.be');
-
     try {
-        // 1. Fetch metadata safely using web_safari client to bypass bot check
-        const metaArgs = ['--no-check-certificates', '--dump-json', url];
-        if (isYouTube) {
-            metaArgs.push('--extractor-args', 'youtube:player_client=web_safari');
-        }
-
-        const { stdout } = await execFilePromise('yt-dlp', metaArgs, { maxBuffer: 1024 * 1024 * 10 });
-        const meta = JSON.parse(stdout);
-        const mediaTitle = meta.title || meta.description || 'KINGBOT Media';
-        const mediaThumbnail = meta.thumbnail || '';
-
-        // 2. Download file safely using web_safari client
-        let dlArgs = [];
-        if (isYouTube) {
-            if (type === 'audio') {
-                dlArgs = ['-x', '--audio-format', 'mp3', '--extractor-args', 'youtube:player_client=web_safari', '-o', outputTemplate, '--no-check-certificates', url];
-            } else {
-                dlArgs = ['-f', 'best[ext=mp4]/best', '--extractor-args', 'youtube:player_client=web_safari', '-o', outputTemplate, '--no-check-certificates', url];
-            }
-        } else {
-            dlArgs = ['-o', outputTemplate, '--no-check-certificates', url];
-        }
-
-        await execFilePromise('yt-dlp', dlArgs, { maxBuffer: 1024 * 1024 * 50 });
-
-        const files = fs.readdirSync('/tmp');
-        const downloadedFile = files.find(f => f.startsWith(`${fileId}_`));
-
-        if (!downloadedFile) {
-            return res.status(200).json({ success: false, error: 'File generation failed: File not found in /tmp' });
-        }
-
-        const host = req.get('host');
-        const protocol = req.protocol;
-        const downloadUrl = `${protocol}://${host}/media/${downloadedFile}`;
-
-        res.json({
-            success: true,
-            title: mediaTitle,
-            thumbnail: mediaThumbnail,
-            downloadUrl: downloadUrl
+        const response = await fetch('https://api.cobalt.tools/', {
+            method: 'POST',
+            headers: {
+                'Accept': 'application/json',
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                url: url,
+                aFormat: type === 'audio' ? 'mp3' : 'best',
+                isAudioOnly: type === 'audio'
+            })
         });
+
+        const data = await response.json();
+
+        if (data.status === 'redirect' || data.status === 'tunnel' || data.url) {
+            return res.json({
+                success: true,
+                title: data.filename || 'KINGBOT Media',
+                thumbnail: '',
+                downloadUrl: data.url || data.picker?.[0]?.url
+            });
+        } else {
+            return res.status(200).json({ 
+                success: false, 
+                error: data.text || 'Failed to fetch media stream' 
+            });
+        }
 
     } catch (err) {
         console.error('Download Error:', err);
-        const exactError = err.stderr || err.message || 'Unknown server execution error';
         res.status(200).json({ 
             success: false, 
-            error: exactError.trim()
+            error: err.message || 'Unknown server error'
         });
     }
 });
@@ -102,7 +72,7 @@ app.get('/search', async (req, res) => {
             duration: video.timestamp
         });
     } catch (err) {
-        res.status(200).json({ success: false, error: err.code || err.message });
+        res.status(200).json({ success: false, error: err.message });
     }
 });
 

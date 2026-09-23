@@ -5,14 +5,14 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get -o Acquire::ForceIPv4=true update && \
     apt-get -o Acquire::ForceIPv4=true install -y --no-install-recommends \
     python3 \
-    python3-pip \
     curl \
     ca-certificates \
     ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
-# Install and update yt-dlp via pip to ensure the latest anti-bot extractors
-RUN pip3 install --no-cache-dir --upgrade yt-dlp
+# Download the standalone yt-dlp binary directly
+RUN curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp && \
+    chmod a+rx /usr/local/bin/yt-dlp
 
 WORKDIR /app
 

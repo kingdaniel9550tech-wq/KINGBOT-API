@@ -31,10 +31,10 @@ app.post('/download', async (req, res) => {
     const isYouTube = url.includes('youtube.com') || url.includes('youtu.be');
 
     try {
-        // 1. Fetch metadata safely
+        // 1. Fetch metadata safely using web_safari client to bypass bot check
         const metaArgs = ['--no-check-certificates', '--dump-json', url];
         if (isYouTube) {
-            metaArgs.push('--extractor-args', 'youtube:player_client=android');
+            metaArgs.push('--extractor-args', 'youtube:player_client=web_safari');
         }
 
         const { stdout } = await execFilePromise('yt-dlp', metaArgs, { maxBuffer: 1024 * 1024 * 10 });
@@ -42,13 +42,13 @@ app.post('/download', async (req, res) => {
         const mediaTitle = meta.title || meta.description || 'KINGBOT Media';
         const mediaThumbnail = meta.thumbnail || '';
 
-        // 2. Download file safely
+        // 2. Download file safely using web_safari client
         let dlArgs = [];
         if (isYouTube) {
             if (type === 'audio') {
-                dlArgs = ['-x', '--audio-format', 'mp3', '--extractor-args', 'youtube:player_client=android', '-o', outputTemplate, '--no-check-certificates', url];
+                dlArgs = ['-x', '--audio-format', 'mp3', '--extractor-args', 'youtube:player_client=web_safari', '-o', outputTemplate, '--no-check-certificates', url];
             } else {
-                dlArgs = ['-f', 'best[ext=mp4]/best', '--extractor-args', 'youtube:player_client=android', '-o', outputTemplate, '--no-check-certificates', url];
+                dlArgs = ['-f', 'best[ext=mp4]/best', '--extractor-args', 'youtube:player_client=web_safari', '-o', outputTemplate, '--no-check-certificates', url];
             }
         } else {
             dlArgs = ['-o', outputTemplate, '--no-check-certificates', url];

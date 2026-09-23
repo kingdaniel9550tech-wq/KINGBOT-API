@@ -1,8 +1,7 @@
 [phases.setup]
-nixPkgs = ["nodejs", "python3", "ffmpeg", "python311Packages.pip"]
+nixPkgs = ["nodejs", "python3", "ffmpeg", "yt-dlp"]
 
 [phases.install]
 cmds = [
-    "npm install",
-    "pip install --upgrade yt-dlp"
+    "npm install"
 ]

@@ -8,7 +8,7 @@ const PORT = process.env.PORT || 3000;
 app.use(express.json());
 app.use(cors());
 
-// Universal Downloader Endpoint
+// Universal Downloader Endpoint with complete Cobalt response mapping
 app.post('/download', async (req, res) => {
     const { url, type } = req.body; 
     if (!url) {
@@ -21,23 +21,37 @@ app.post('/download', async (req, res) => {
             headers: {
                 'Accept': 'application/json',
                 'Content-Type': 'application/json',
-                'User-Agent': 'Mozilla/5.0'
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
             },
             body: JSON.stringify({
                 url: url,
                 audioFormat: type === 'audio' ? 'mp3' : 'best',
-                downloadMode: type === 'audio' ? 'audio' : 'auto'
+                downloadMode: type === 'audio' ? 'audio' : 'auto',
+                filenameStyle: 'basic'
             })
         });
 
         const data = await response.json();
+        console.log('Cobalt API Response:', data);
+
+        let finalUrl = null;
+        let title = data.filename || 'KINGBOT Media';
 
         if (data.status === 'redirect' || data.status === 'tunnel' || data.url) {
+            finalUrl = data.url;
+        } else if (data.status === 'picker' && data.picker && data.picker.length > 0) {
+            finalUrl = data.picker[0].url;
+            title = data.picker[0].filename || title;
+        } else if (data.status === 'local-processing') {
+            finalUrl = data.tunnel?.[0] || data.audio?.url;
+        }
+
+        if (finalUrl) {
             return res.json({
                 success: true,
-                title: data.filename || 'KINGBOT Media',
+                title: title,
                 thumbnail: data.thumbnail || '',
-                downloadUrl: data.url || data.picker?.[0]?.url
+                downloadUrl: finalUrl
             });
         } else {
             return res.status(200).json({ 
@@ -61,8 +75,8 @@ app.get('/search', async (req, res) => {
     if (!query) return res.status(200).json({ success: false, error: 'Query is required' });
 
     try {
-        const searchResult = await yts(query);
-        const video = searchResult.videos[0];
+        const searchResult = yts(query);
+        const video = (await searchResult).videos[0];
         if (!video) return res.status(200).json({ success: false, error: 'No results found' });
 
         res.json({

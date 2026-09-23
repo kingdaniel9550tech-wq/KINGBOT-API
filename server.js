@@ -13,28 +13,12 @@ const PORT = process.env.PORT || 3000;
 app.use(express.json());
 app.use(cors());
 
+// Serve downloaded media files statically from /tmp
+app.use('/media', express.static('/tmp'));
+
 if (!fs.existsSync('/tmp')) {
     fs.mkdirSync('/tmp', { recursive: true });
 }
-
-// Serve media file once, then automatically delete it from /tmp
-app.get('/media/:filename', (req, res) => {
-    const filename = path.basename(req.params.filename); // Prevent directory traversal
-    const filePath = path.join('/tmp', filename);
-
-    if (fs.existsSync(filePath)) {
-        res.sendFile(filePath, (err) => {
-            if (!err) {
-                // Automatically delete the file after successful transmission
-                fs.unlink(filePath, (unlinkErr) => {
-                    if (unlinkErr) console.error('Failed to delete temporary file:', unlinkErr);
-                });
-            }
-        });
-    } else {
-        res.status(404).json({ success: false, error: 'File not found or already deleted' });
-    }
-});
 
 // Multi-Platform Downloader Endpoint (YouTube, TikTok, Facebook, Instagram, Audiomack, etc.)
 app.post('/download', async (req, res) => {
@@ -53,7 +37,7 @@ app.post('/download', async (req, res) => {
     const isYouTube = url.includes('youtube.com') || url.includes('youtu.be');
 
     if (isYouTube) {
-        // 1. YouTube Client Rotation Logic
+        // 1. YouTube Client Rotation Logic to bypass bot blocks
         const clients = ['android', 'mweb', 'web'];
         for (const client of clients) {
             try {
@@ -84,11 +68,9 @@ app.post('/download', async (req, res) => {
             }
         }
     } else {
-        // 2. Multi-Platform Logic (TikTok, IG, FB, Audiomack)
+        // 2. Multi-Platform Logic for TikTok, Facebook, Instagram, Audiomack, etc.
         try {
-            const userAgent = 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1';
-            
-            const metaCmd = `yt-dlp --dump-json --no-check-certificates --user-agent "${userAgent}" "${url}"`;
+            const metaCmd = `yt-dlp --dump-json --no-check-certificates "${url}"`;
             const { stdout: metaStdout } = await execPromise(metaCmd, { maxBuffer: 1024 * 1024 * 10 });
             const meta = JSON.parse(metaStdout);
             videoTitle = meta.title || meta.description || videoTitle;
@@ -96,9 +78,9 @@ app.post('/download', async (req, res) => {
 
             let dlCmd = '';
             if (type === 'audio') {
-                dlCmd = `yt-dlp -x --audio-format mp3 --user-agent "${userAgent}" -o "${outputTemplate}" --no-check-certificates "${url}"`;
+                dlCmd = `yt-dlp -x --audio-format mp3 -o "${outputTemplate}" --no-check-certificates "${url}"`;
             } else {
-                dlCmd = `yt-dlp --user-agent "${userAgent}" -o "${outputTemplate}" --no-check-certificates "${url}"`;
+                dlCmd = `yt-dlp -f "best[ext=mp4]/best/best" -o "${outputTemplate}" --no-check-certificates "${url}"`;
             }
 
             await execPromise(dlCmd, { maxBuffer: 1024 * 1024 * 50 });

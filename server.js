@@ -76,7 +76,6 @@ app.post('/download', async (req, res) => {
 
     } catch (err) {
         console.error('Download Error:', err);
-        // Send status 200 with the exact error message so WhatsApp displays it instead of code 500
         const exactError = err.stderr || err.message || 'Unknown server execution error';
         res.status(200).json({ 
             success: false, 
@@ -103,7 +102,7 @@ app.get('/search', async (req, res) => {
             duration: video.timestamp
         });
     } catch (err) {
-        res.status(200).json({ success: false, error: err.message });
+        res.status(200).json({ success: false, error: err.code || err.message });
     }
 });
 

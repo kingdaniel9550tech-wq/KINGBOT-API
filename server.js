@@ -8,7 +8,7 @@ const PORT = process.env.PORT || 3000;
 app.use(express.json());
 app.use(cors());
 
-// Universal Downloader Endpoint (Zero local dependencies, Zero IP blocks)
+// Universal Downloader Endpoint using the official Cobalt API
 app.post('/download', async (req, res) => {
     const { url, type } = req.body; 
     if (!url) {
@@ -16,16 +16,17 @@ app.post('/download', async (req, res) => {
     }
 
     try {
-        const response = await fetch('https://co.wuk.sh/api/json', {
+        const response = await fetch('https://api.cobalt.tools/api/json', {
             method: 'POST',
             headers: {
                 'Accept': 'application/json',
-                'Content-Type': 'application/json'
+                'Content-Type': 'application/json',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
             },
             body: JSON.stringify({
                 url: url,
-                aFormat: type === 'audio' ? 'mp3' : 'best',
-                isAudioOnly: type === 'audio'
+                audioFormat: type === 'audio' ? 'mp3' : 'best',
+                downloadMode: type === 'audio' ? 'audio' : 'auto'
             })
         });
 
@@ -41,7 +42,7 @@ app.post('/download', async (req, res) => {
         } else {
             return res.status(200).json({ 
                 success: false, 
-                error: data.text || 'Failed to extract media stream' 
+                error: data.text || data.error?.code || 'Failed to extract media stream' 
             });
         }
 
@@ -49,7 +50,7 @@ app.post('/download', async (req, res) => {
         console.error('Download Error:', err);
         return res.status(200).json({ 
             success: false, 
-            error: 'Server connection error'
+            error: err.message || 'Server connection error'
         });
     }
 });

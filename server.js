@@ -8,13 +8,18 @@ const PORT = process.env.PORT || 3000;
 app.use(express.json());
 app.use(cors());
 
-// Universal Downloader Endpoint with complete Cobalt response mapping
+// Universal Downloader with Multi-Gateway Fallback (Permanent Fix)
 app.post('/download', async (req, res) => {
     const { url, type } = req.body; 
     if (!url) {
         return res.status(200).json({ success: false, error: 'URL is required' });
     }
 
+    let downloadUrl = null;
+    let title = 'KINGBOT Media';
+    let thumbnail = '';
+
+    // Gateway 1: Cobalt API
     try {
         const response = await fetch('https://api.cobalt.tools/api/json', {
             method: 'POST',
@@ -30,41 +35,48 @@ app.post('/download', async (req, res) => {
                 filenameStyle: 'basic'
             })
         });
-
         const data = await response.json();
-        console.log('Cobalt API Response:', data);
-
-        let finalUrl = null;
-        let title = data.filename || 'KINGBOT Media';
-
         if (data.status === 'redirect' || data.status === 'tunnel' || data.url) {
-            finalUrl = data.url;
-        } else if (data.status === 'picker' && data.picker && data.picker.length > 0) {
-            finalUrl = data.picker[0].url;
+            downloadUrl = data.url;
+            title = data.filename || title;
+            thumbnail = data.thumbnail || '';
+        } else if (data.status === 'picker' && data.picker?.[0]?.url) {
+            downloadUrl = data.picker[0].url;
             title = data.picker[0].filename || title;
-        } else if (data.status === 'local-processing') {
-            finalUrl = data.tunnel?.[0] || data.audio?.url;
+            thumbnail = data.thumbnail || '';
         }
-
-        if (finalUrl) {
-            return res.json({
-                success: true,
-                title: title,
-                thumbnail: data.thumbnail || '',
-                downloadUrl: finalUrl
-            });
-        } else {
-            return res.status(200).json({ 
-                success: false, 
-                error: data.text || data.error?.code || 'Failed to extract media stream' 
-            });
-        }
-
     } catch (err) {
-        console.error('Download Error:', err);
+        console.log('Gateway 1 skipped, rolling over...');
+    }
+
+    // Gateway 2: Secondary Public Media Extractor (Instant Fallback)
+    if (!downloadUrl) {
+        try {
+            const altResponse = await fetch(`https://delivrio.xyz/api/download?url=${encodeURIComponent(url)}`, {
+                headers: { 'User-Agent': 'Mozilla/5.0' }
+            });
+            const altData = await altResponse.json();
+            if (altData.success && altData.downloadUrl) {
+                downloadUrl = altData.downloadUrl;
+                title = altData.title || title;
+                thumbnail = altData.thumbnail || thumbnail;
+            }
+        } catch (err) {
+            console.log('Gateway 2 skipped...');
+        }
+    }
+
+    if (downloadUrl) {
+        return res.json({
+            success: true,
+            title: title,
+            thumbnail: thumbnail,
+            downloadUrl: downloadUrl
+        });
+    } else {
         return res.status(200).json({ 
             success: false, 
-            error: err.message || 'Server connection error'
+            error: 'Stream extraction failed across all redundant gateways.' 
         });
     }
 });
@@ -75,8 +87,8 @@ app.get('/search', async (req, res) => {
     if (!query) return res.status(200).json({ success: false, error: 'Query is required' });
 
     try {
-        const searchResult = yts(query);
-        const video = (await searchResult).videos[0];
+        const searchResult = await yts(query);
+        const video = searchResult.videos[0];
         if (!video) return res.status(200).json({ success: false, error: 'No results found' });
 
         res.json({

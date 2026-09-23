@@ -8,7 +8,7 @@ const PORT = process.env.PORT || 3000;
 app.use(express.json());
 app.use(cors());
 
-// Universal Downloader Endpoint via Cobalt API
+// Universal Downloader Endpoint (Zero local dependencies, Zero IP blocks)
 app.post('/download', async (req, res) => {
     const { url, type } = req.body; 
     if (!url) {
@@ -16,50 +16,40 @@ app.post('/download', async (req, res) => {
     }
 
     try {
-        const response = await fetch('https://api.cobalt.tools/', {
+        const response = await fetch('https://co.wuk.sh/api/json', {
             method: 'POST',
             headers: {
                 'Accept': 'application/json',
-                'Content-Type': 'application/json',
-                'User-Agent': 'KingbotAPI/1.0'
+                'Content-Type': 'application/json'
             },
             body: JSON.stringify({
                 url: url,
-                audioFormat: type === 'audio' ? 'mp3' : 'mp4',
-                videoQuality: '720',
+                aFormat: type === 'audio' ? 'mp3' : 'best',
                 isAudioOnly: type === 'audio'
             })
         });
 
         const data = await response.json();
-        console.log('Cobalt Response:', JSON.stringify(data));
 
         if (data.status === 'redirect' || data.status === 'tunnel' || data.url) {
             return res.json({
                 success: true,
                 title: data.filename || 'KINGBOT Media',
-                thumbnail: '',
+                thumbnail: data.thumbnail || '',
                 downloadUrl: data.url || data.picker?.[0]?.url
-            });
-        } else if (data.status === 'picker' && data.picker && data.picker.length > 0) {
-            return res.json({
-                success: true,
-                title: 'KINGBOT Media',
-                thumbnail: '',
-                downloadUrl: data.picker[0].url
             });
         } else {
             return res.status(200).json({ 
                 success: false, 
-                error: data.text || data.message || 'Failed to extract direct audio stream' 
+                error: data.text || 'Failed to extract media stream' 
             });
         }
 
     } catch (err) {
         console.error('Download Error:', err);
-        res.status(200).json({ 
+        return res.status(200).json({ 
             success: false, 
-            error: err.message || 'Server request failed' 
+            error: 'Server connection error'
         });
     }
 });

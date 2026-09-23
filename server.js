@@ -8,7 +8,7 @@ const PORT = process.env.PORT || 3000;
 app.use(express.json());
 app.use(cors());
 
-// Universal Downloader Endpoint using Public API (No yt-dlp / cookies needed)
+// Universal Downloader Endpoint via Cobalt API
 app.post('/download', async (req, res) => {
     const { url, type } = req.body; 
     if (!url) {
@@ -20,16 +20,19 @@ app.post('/download', async (req, res) => {
             method: 'POST',
             headers: {
                 'Accept': 'application/json',
-                'Content-Type': 'application/json'
+                'Content-Type': 'application/json',
+                'User-Agent': 'KingbotAPI/1.0'
             },
             body: JSON.stringify({
                 url: url,
-                aFormat: type === 'audio' ? 'mp3' : 'best',
+                audioFormat: type === 'audio' ? 'mp3' : 'mp4',
+                videoQuality: '720',
                 isAudioOnly: type === 'audio'
             })
         });
 
         const data = await response.json();
+        console.log('Cobalt Response:', JSON.stringify(data));
 
         if (data.status === 'redirect' || data.status === 'tunnel' || data.url) {
             return res.json({
@@ -38,10 +41,17 @@ app.post('/download', async (req, res) => {
                 thumbnail: '',
                 downloadUrl: data.url || data.picker?.[0]?.url
             });
+        } else if (data.status === 'picker' && data.picker && data.picker.length > 0) {
+            return res.json({
+                success: true,
+                title: 'KINGBOT Media',
+                thumbnail: '',
+                downloadUrl: data.picker[0].url
+            });
         } else {
             return res.status(200).json({ 
                 success: false, 
-                error: data.text || 'Failed to fetch media stream' 
+                error: data.text || data.message || 'Failed to extract direct audio stream' 
             });
         }
 
@@ -49,7 +59,7 @@ app.post('/download', async (req, res) => {
         console.error('Download Error:', err);
         res.status(200).json({ 
             success: false, 
-            error: err.message || 'Unknown server error'
+            error: err.message || 'Server request failed' 
         });
     }
 });

@@ -40,7 +40,6 @@ RUN apt-get -o Acquire::ForceIPv4=true update && \
     libxcomposite1 \
     libxcursor1 \
     libxdamage1 \
-    libextst6 \
     libxfixes3 \
     libxi6 \
     libxrandr2 \

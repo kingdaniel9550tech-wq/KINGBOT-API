@@ -6,7 +6,7 @@ const execPromise = util.promisify(exec);
 const yts = require('yt-search');
 const path = require('path');
 const fs = require('fs');
-const puppeteer = require('puppeteer-core'); // Requires chromium binary or buildpacks supporting it
+const puppeteer = require('puppeteer-core');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -32,7 +32,7 @@ if (process.env.COOKIES_BASE64) {
 }
 
 async function fetchWithTimeout(resource, options = {}) {
-    const { timeout = 3000 } = options;
+    const { timeout = 2500 } = options;
     const controller = new AbortController();
     const id = setTimeout(() => controller.abort(), timeout);
     try {
@@ -48,16 +48,15 @@ async function fetchWithTimeout(resource, options = {}) {
     }
 }
 
-// Browser Simulation Fallback using Puppeteer
+// Fixed browser simulation with proper container flags
 async function simulateBrowserExtraction(targetUrl) {
     let browser = null;
     try {
-        // Look for system Chromium path common in Docker/Linux containers
-        const executablePath = process.env.CHROME_BIN || '/usr/bin/google-chrome' || '/usr/bin/chromium-browser';
+        const executablePath = process.env.CHROME_BIN || '/usr/bin/chromium';
         
         browser = await puppeteer.launch({
             executablePath,
-            headless: 'new',
+            headless: true,
             args: [
                 '--no-sandbox',
                 '--disable-setuid-sandbox',
@@ -65,8 +64,11 @@ async function simulateBrowserExtraction(targetUrl) {
                 '--disable-accelerated-2d-canvas',
                 '--no-first-run',
                 '--no-zygote',
-                '--single-process', 
-                '--disable-gpu'
+                '--single-process',
+                '--disable-gpu',
+                '--disable-software-rasterizer',
+                '--disable-extensions',
+                '--disable-features=AudioServiceOutOfProcess'
             ]
         });
 
@@ -75,20 +77,17 @@ async function simulateBrowserExtraction(targetUrl) {
 
         let interceptedStreamUrl = null;
 
-        // Intercept network requests to capture direct media/audio payloads
-        await page.requestInterception(true);
+        await page.setRequestInterception(true);
         page.on('request', interceptedRequest => {
             const reqUrl = interceptedRequest.url();
-            if ((reqUrl.includes('.googlevideo.com/videoplayback') || reqUrl.includes('audio/mp4') || reqUrl.includes('mime=audio')) && !interceptedStreamUrl) {
+            if ((reqUrl.includes('.googlevideo.com/videoplayback') || reqUrl.includes('mime=audio') || reqUrl.includes('mime=video')) && !interceptedStreamUrl) {
                 interceptedStreamUrl = reqUrl;
             }
             interceptedRequest.continue();
         });
 
-        await page.goto(targetUrl, { waitUntil: 'networkidle2', timeout: 15000 });
-        
-        // Give it a brief moment to sniff media requests
-        await new Promise(resolve => setTimeout(resolve, 3000));
+        await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 12000 });
+        await new Promise(resolve => setTimeout(resolve, 2500));
 
         await browser.close();
         return interceptedStreamUrl;
@@ -114,9 +113,9 @@ app.post('/download', async (req, res) => {
 
     try {
         if (url.includes('youtube.com') || url.includes('youtu.be')) {
-            console.log("🛡️ [BROWSER-MODE] Initializing multi-tier extraction & browser simulation...");
+            console.log("🛡️ [GOD-MODE] Processing YouTube request...");
 
-            // 1. Try Public Gateways first
+            // 1. Public Gateways
             const gateways = [
                 'https://api.cobalt.tools/api/json',
                 'https://co.wuk.sh/api/json',
@@ -132,7 +131,7 @@ app.post('/download', async (req, res) => {
                         method: 'POST',
                         headers: { 'Accept': 'application/json', 'Content-Type': 'application/json', 'User-Agent': 'Mozilla/5.0' },
                         body: JSON.stringify({ url: url, isAudioOnly: type === 'audio' })
-                    }, { timeout: 2500 });
+                    }, { timeout: 2000 });
                     
                     const apiData = await apiRes.json();
                     const directUrl = apiData.url || (apiData.picker && apiData.picker[0]?.url);
@@ -148,19 +147,19 @@ app.post('/download', async (req, res) => {
                 return res.json({ success: true, title: mediaTitle, downloadUrl: successUrl });
             }
 
-            // 2. Try Browser Simulation Sniffing via Puppeteer
-            console.log("🌐 Gateways busy. Launching headless browser simulation engine...");
+            // 2. Browser Simulation Sniffing
+            console.log("🌐 Launching headless browser simulation engine...");
             const browserStream = await simulateBrowserExtraction(url);
             if (browserStream) {
                 return res.json({
                     success: true,
-                    title: 'KINGBOT Browser Extracted Media',
+                    title: 'KINGBOT Browser Stream',
                     downloadUrl: browserStream
                 });
             }
 
-            // 3. Fallback to Local Client Matrix Army
-            console.log("🔄 Browser sniffing blocked. Deploying local client disguise army...");
+            // 3. Local yt-dlp Client Matrix Army Fallback
+            console.log("🔄 Deploying local client disguise matrix...");
             const clientStrategies = [{ client: 'android', skip: 'webpage' }, { client: 'ios', skip: 'configs,js' }, { client: 'tv_embedded', skip: '' }];
 
             let localSuccess = false;
@@ -187,7 +186,7 @@ app.post('/download', async (req, res) => {
             if (!localSuccess && !downloadedFile) {
                 return res.json({
                     success: false,
-                    error: "YouTube streaming gateways and browser simulation are temporarily restricted."
+                    error: "Failed to extract direct audio stream. Please try again later."
                 });
             }
 
@@ -211,7 +210,7 @@ app.post('/download', async (req, res) => {
     if (!downloadedFile) {
         return res.json({ 
             success: false, 
-            error: `Download failed: Platform restriction.` 
+            error: `Failed to extract direct audio stream.` 
         });
     }
 
@@ -236,7 +235,7 @@ app.get('/search', async (req, res) => {
         if (!video) return res.status(404).json({ success: false, error: 'No results found' });
 
         res.json({
-            success:/true/,
+            success: true,
             title: video.title,
             url: video.url,
             thumbnail: video.thumbnail,
@@ -247,4 +246,4 @@ app.get('/search', async (req, res) => {
     }
 });
 
-app.listen(PORT, () => console.log(`Kingbot Browser-Simulated API running on port ${PORT}`));
+app.listen(PORT, () => console.log(`Kingbot God-Mode Ultimate API running on port ${PORT}`));

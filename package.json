@@ -1,14 +1,16 @@
 {
   "name": "kingbot-api",
   "version": "1.0.0",
-  "description": "Kingbot downloader API",
+  "description": "Kingbot downloader API with browser simulation and multi-tier extraction",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
   "dependencies": {
+    "axios": "^1.6.8",
     "cors": "^2.8.5",
     "express": "^4.19.2",
+    "puppeteer-core": "^22.6.0",
     "youtube-dl-exec": "^2.5.8",
     "yt-search": "^2.11.0"
   }

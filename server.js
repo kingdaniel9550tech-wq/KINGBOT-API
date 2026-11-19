@@ -1,8 +1,8 @@
 const express = require('express');
 const cors = require('cors');
-const { exec } = require('child_process');
+const { execFile } = require('child_process');
 const util = require('util');
-const execPromise = util.promisify(exec);
+const execFilePromise = util.promisify(execFile);
 const yts = require('yt-search');
 const path = require('path');
 const fs = require('fs');
@@ -24,20 +24,22 @@ if (process.env.COOKIES_BASE64) {
     try {
         const decodedCookies = Buffer.from(process.env.COOKIES_BASE64, 'base64').toString('utf8');
         fs.writeFileSync(cookiesPath, decodedCookies);
-        console.log("Cookies loaded from COOKIES_BASE64.");
+        console.log('Cookies decoded and written to /tmp/cookies.txt');
     } catch (err) {
-        console.warn("Failed to decode COOKIES_BASE64:", err.message);
+        console.warn('Failed to decode COOKIES_BASE64:', err.message);
     }
 }
 
 function isYouTubeUrl(url = '') {
-    return url.includes('youtube.com') || url.includes('youtu.be');
+    return /https?:\/\/(www\.)?(youtube\.com|youtu\.be)\//i.test(url);
 }
 
 function findDownloadedFile(prefix) {
     try {
         const files = fs.readdirSync(TMP_DIR);
-        const match = files.find(f => f.startsWith(`${prefix}_`) && !f.endsWith('.part') && !f.endsWith('.ytdl'));
+        const match = files.find(
+            f => f.startsWith(`${prefix}_`) && !f.endsWith('.part') && !f.endsWith('.ytdl') && !f.endsWith('.temp')
+        );
         if (!match) return null;
         const fullPath = path.join(TMP_DIR, match);
         const stats = fs.statSync(fullPath);
@@ -47,31 +49,54 @@ function findDownloadedFile(prefix) {
     }
 }
 
-async function runYtDlp({ url, type, fileId, cookiesFlag, proxyFlag, playerClient = null }) {
-    const outputTemplate = path.join(TMP_DIR, `${fileId}_%(id)s.%(ext)s`);
-    const clientFlag = playerClient
-        ? `--extractor-args "youtube:player_client=${playerClient}"`
-        : '';
-    const formatFlag = type === 'audio'
-        ? `-x --audio-format mp3 --audio-quality 0`
-        : `-f "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best" --merge-output-format mp4`;
+function cleanupPrefixFiles(prefix) {
+    try {
+        const files = fs.readdirSync(TMP_DIR);
+        for (const file of files) {
+            if (file.startsWith(`${prefix}_`)) {
+                fs.unlinkSync(path.join(TMP_DIR, file));
+            }
+        }
+    } catch (_) {}
+}
 
-    const cmd = [
-        'yt-dlp',
+async function runYtDlp({ url, type, fileId, playerClient = null }) {
+    const outputTemplate = path.join(TMP_DIR, `${fileId}_%(id)s.%(ext)s`);
+    const args = [
         '--no-warnings',
         '--no-playlist',
         '--force-ipv4',
         '--no-check-certificates',
-        '--remote-components ejs:github',
-        cookiesFlag,
-        proxyFlag,
-        clientFlag,
-        formatFlag,
-        `-o "${outputTemplate}"`,
-        `"${url}"`
-    ].filter(Boolean).join(' ');
+        '--remote-components',
+        'ejs:github'
+    ];
 
-    await execPromise(cmd, {
+    if (fs.existsSync(cookiesPath)) {
+        args.push('--cookies', cookiesPath);
+    }
+
+    if (process.env.PROXY_URL) {
+        args.push('--proxy', process.env.PROXY_URL);
+    }
+
+    if (playerClient) {
+        args.push('--extractor-args', `youtube:player_client=${playerClient}`);
+    }
+
+    if (type === 'audio') {
+        args.push('-x', '--audio-format', 'mp3', '--audio-quality', '0');
+    } else {
+        args.push(
+            '-f',
+            'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+            '--merge-output-format',
+            'mp4'
+        );
+    }
+
+    args.push('-o', outputTemplate, url);
+
+    await execFilePromise('yt-dlp', args, {
         maxBuffer: 1024 * 1024 * 64,
         timeout: 90000
     });
@@ -110,19 +135,28 @@ async function tryExternalMirrors(url, type) {
             const data = await res.json();
             const directUrl = data.url || (Array.isArray(data.picker) && data.picker[0]?.url);
 
-            // Reject any fallback page URL that is not an actual media/stream URL
             if (directUrl && !isYouTubeUrl(directUrl)) {
                 return {
                     downloadUrl: directUrl,
                     title: data.filename || data.text || 'KINGBOT Media Download'
                 };
             }
-        } catch (_) {
+        } catch (err) {
             clearTimeout(timer);
+            console.warn(`[MIRROR FAIL - ${gateway}]:`, err.message);
         }
     }
     return null;
 }
+
+app.get('/', (req, res) => {
+    res.json({
+        status: 'online',
+        service: 'KINGBOT-API',
+        cookiesLoaded: fs.existsSync(cookiesPath),
+        proxyConfigured: Boolean(process.env.PROXY_URL)
+    });
+});
 
 app.get('/health', (req, res) => {
     res.json({ status: 'ok', uptime: process.uptime() });
@@ -135,11 +169,10 @@ app.post('/download', async (req, res) => {
     }
 
     const fileId = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-    const cookiesFlag = fs.existsSync(cookiesPath) ? `--cookies "${cookiesPath}"` : '';
-    const proxyFlag = process.env.PROXY_URL ? `--proxy "${process.env.PROXY_URL}"` : '';
-
     let downloadedFile = null;
     let lastError = '';
+
+    console.log(`[DOWNLOAD REQUEST] type=${type} url=${url}`);
 
     try {
         if (isYouTubeUrl(url)) {
@@ -147,17 +180,21 @@ app.post('/download', async (req, res) => {
 
             for (const client of clientRotation) {
                 try {
+                    console.log(`[YT-DLP TRY - ${client}] Attempting extraction...`);
                     downloadedFile = await runYtDlp({
                         url,
                         type,
                         fileId,
-                        cookiesFlag,
-                        proxyFlag,
                         playerClient: client
                     });
-                    if (downloadedFile) break;
+                    if (downloadedFile) {
+                        console.log(`[YT-DLP SUCCESS - ${client}] Saved ${downloadedFile}`);
+                        break;
+                    }
                 } catch (err) {
-                    lastError = err.stderr || err.message || String(err);
+                    cleanupPrefixFiles(fileId);
+                    lastError = (err.stderr || err.message || String(err)).trim();
+                    console.error(`[YT-DLP FAIL - ${client}]:`, lastError.slice(-500));
                 }
             }
 
@@ -172,17 +209,21 @@ app.post('/download', async (req, res) => {
                 }
             }
         } else {
-            // Audiomack, Instagram, Facebook, TikTok, SoundCloud, etc.
             try {
+                console.log('[YT-DLP TRY - universal] Attempting extraction...');
                 downloadedFile = await runYtDlp({
                     url,
                     type,
-                    fileId,
-                    cookiesFlag,
-                    proxyFlag
+                    fileId
                 });
+                if (downloadedFile) {
+                    console.log(`[YT-DLP SUCCESS - universal] Saved ${downloadedFile}`);
+                }
             } catch (err) {
-                lastError = err.stderr || err.message || String(err);
+                cleanupPrefixFiles(fileId);
+                lastError = (err.stderr || err.message || String(err)).trim();
+                console.error('[YT-DLP FAIL - universal]:', lastError.slice(-500));
+
                 const mirrorResult = await tryExternalMirrors(url, type);
                 if (mirrorResult) {
                     return res.json({
@@ -200,7 +241,7 @@ app.post('/download', async (req, res) => {
                 error: type === 'video'
                     ? 'Failed to extract direct video stream.'
                     : 'Failed to extract direct audio stream.',
-                details: lastError.slice(-300)
+                details: lastError.slice(-400)
             });
         }
 
@@ -214,12 +255,14 @@ app.post('/download', async (req, res) => {
             downloadUrl
         });
     } catch (err) {
+        cleanupPrefixFiles(fileId);
         console.error('Unexpected /download error:', err);
         return res.status(200).json({
             success: false,
             error: type === 'video'
                 ? 'Failed to extract direct video stream.'
-                : 'Failed to extract direct audio stream.'
+                : 'Failed to extract direct audio stream.',
+            details: String(err.message || err).slice(-400)
         });
     }
 });

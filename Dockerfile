@@ -1,6 +1,7 @@
 FROM node:20-slim
 
 ENV DEBIAN_FRONTEND=noninteractive
+ENV PATH="/root/.deno/bin:$PATH"
 
 RUN apt-get -o Acquire::ForceIPv4=true update && \
     apt-get -o Acquire::ForceIPv4=true install -y --no-install-recommends \
@@ -13,14 +14,22 @@ RUN apt-get -o Acquire::ForceIPv4=true update && \
     ca-certificates \
     ffmpeg \
     unzip \
+    git \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Deno for yt-dlp JS challenge solving
 RUN curl -fsSL https://deno.land/install.sh | sh
-ENV PATH="/root/.deno/bin:$PATH"
 
-# Install yt-dlp with curl-cffi for browser TLS/JA3 impersonation
-RUN pip3 install --no-cache-dir --upgrade --break-system-packages "yt-dlp[default,curl-cffi]"
+# Install yt-dlp nightly + curl-cffi + bgutil PO token provider plugin
+RUN pip3 install --no-cache-dir --upgrade --break-system-packages \
+    "yt-dlp[default,curl-cffi] @ https://github.com/yt-dlp/yt-dlp-nightly-builds/archive/refs/heads/master.tar.gz" \
+    "bgutil-ytdlp-pot-provider"
+
+# Build bgutil POT HTTP server so yt-dlp can generate per-video PO tokens locally
+RUN git clone --depth 1 https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git /opt/bgutil-provider && \
+    cd /opt/bgutil-provider/server && \
+    npm install --omit=dev && \
+    npx tsc
 
 WORKDIR /app
 
@@ -30,4 +39,4 @@ RUN npm install --omit=dev
 COPY . .
 
 EXPOSE 3000
-CMD ["node", "server.js"]
+CMD ["sh", "-c", "node /opt/bgutil-provider/server/build/main.js --port 4416 & sleep 2 && node server.js"]

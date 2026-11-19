@@ -86,9 +86,7 @@ async function runYtDlp({
         '--fragment-retries',
         '5',
         '--retry-sleep',
-        'fragment:linear=1:4:1',
-        '--extractor-args',
-        'youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416'
+        'fragment:linear=1:4:1'
     ];
 
     if (useImpersonate) {

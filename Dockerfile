@@ -1,4 +1,4 @@
-FROM node:20-slim
+FROM node:22-slim
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PATH="/root/.deno/bin:$PATH"
@@ -20,17 +20,17 @@ RUN apt-get -o Acquire::ForceIPv4=true update && \
 # Install Deno for yt-dlp JS challenge solving
 RUN curl -fsSL https://deno.land/install.sh | sh
 
-# Install yt-dlp + curl-cffi + bgutil PO token provider plugin, then switch yt-dlp to nightly
+# Install yt-dlp + curl-cffi + bgutil PO token provider plugin via pip
 RUN pip3 install --no-cache-dir --upgrade --break-system-packages \
     "yt-dlp[default,curl-cffi]" \
-    "bgutil-ytdlp-pot-provider" && \
-    yt-dlp --update-to nightly || true
+    "bgutil-ytdlp-pot-provider"
 
-# Build bgutil POT HTTP server so yt-dlp can generate per-video PO tokens locally
-RUN git clone --depth 1 https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git /opt/bgutil-provider && \
+# Install TypeScript compiler globally and build bgutil POT HTTP server
+RUN npm install -g typescript && \
+    git clone --depth 1 https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git /opt/bgutil-provider && \
     cd /opt/bgutil-provider/server && \
     npm install --omit=dev && \
-    npx tsc
+    tsc
 
 WORKDIR /app
 

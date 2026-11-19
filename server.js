@@ -9,172 +9,235 @@ const fs = require('fs');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+const TMP_DIR = '/tmp';
 
 app.use(express.json());
 app.use(cors());
+app.use('/media', express.static(TMP_DIR));
 
-app.use('/media', express.static('/tmp'));
-
-if (!fs.existsSync('/tmp')) {
-    fs.mkdirSync('/tmp', { recursive: true });
+if (!fs.existsSync(TMP_DIR)) {
+    fs.mkdirSync(TMP_DIR, { recursive: true });
 }
 
-const cookiesPath = '/tmp/cookies.txt';
+const cookiesPath = path.join(TMP_DIR, 'cookies.txt');
 if (process.env.COOKIES_BASE64) {
     try {
         const decodedCookies = Buffer.from(process.env.COOKIES_BASE64, 'base64').toString('utf8');
         fs.writeFileSync(cookiesPath, decodedCookies);
-        console.log("Cookies decoded and loaded successfully from Base64.");
+        console.log("Cookies loaded from COOKIES_BASE64.");
     } catch (err) {
-        console.warn("Failed to decode cookies base64:", err.message);
+        console.warn("Failed to decode COOKIES_BASE64:", err.message);
     }
 }
 
-async function fetchWithTimeout(resource, options = {}) {
-    const { timeout = 3000 } = options;
-    const controller = new AbortController();
-    const id = setTimeout(() => controller.abort(), timeout);
+function isYouTubeUrl(url = '') {
+    return url.includes('youtube.com') || url.includes('youtu.be');
+}
+
+function findDownloadedFile(prefix) {
     try {
-        const response = await fetch(resource, {
-            ...options,
-            signal: controller.signal
-        });
-        clearTimeout(id);
-        return response;
-    } catch (error) {
-        clearTimeout(id);
-        throw error;
+        const files = fs.readdirSync(TMP_DIR);
+        const match = files.find(f => f.startsWith(`${prefix}_`) && !f.endsWith('.part') && !f.endsWith('.ytdl'));
+        if (!match) return null;
+        const fullPath = path.join(TMP_DIR, match);
+        const stats = fs.statSync(fullPath);
+        return stats.size > 1024 ? match : null;
+    } catch (_) {
+        return null;
     }
 }
+
+async function runYtDlp({ url, type, fileId, cookiesFlag, proxyFlag, playerClient = null }) {
+    const outputTemplate = path.join(TMP_DIR, `${fileId}_%(id)s.%(ext)s`);
+    const clientFlag = playerClient
+        ? `--extractor-args "youtube:player_client=${playerClient}"`
+        : '';
+    const formatFlag = type === 'audio'
+        ? `-x --audio-format mp3 --audio-quality 0`
+        : `-f "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best" --merge-output-format mp4`;
+
+    const cmd = [
+        'yt-dlp',
+        '--no-warnings',
+        '--no-playlist',
+        '--force-ipv4',
+        '--no-check-certificates',
+        '--remote-components ejs:github',
+        cookiesFlag,
+        proxyFlag,
+        clientFlag,
+        formatFlag,
+        `-o "${outputTemplate}"`,
+        `"${url}"`
+    ].filter(Boolean).join(' ');
+
+    await execPromise(cmd, {
+        maxBuffer: 1024 * 1024 * 64,
+        timeout: 90000
+    });
+
+    return findDownloadedFile(fileId);
+}
+
+async function tryExternalMirrors(url, type) {
+    const gateways = [
+        'https://api.cobalt.tools/api/json',
+        'https://co.wuk.sh/api/json',
+        'https://co.projectlization.com/api/json'
+    ];
+
+    for (const gateway of gateways) {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 5000);
+        try {
+            const res = await fetch(gateway, {
+                method: 'POST',
+                headers: {
+                    'Accept': 'application/json',
+                    'Content-Type': 'application/json',
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                },
+                body: JSON.stringify({
+                    url,
+                    downloadMode: type === 'audio' ? 'audio' : 'auto',
+                    isAudioOnly: type === 'audio'
+                }),
+                signal: controller.signal
+            });
+            clearTimeout(timer);
+
+            if (!res.ok) continue;
+            const data = await res.json();
+            const directUrl = data.url || (Array.isArray(data.picker) && data.picker[0]?.url);
+
+            // Reject any fallback page URL that is not an actual media/stream URL
+            if (directUrl && !isYouTubeUrl(directUrl)) {
+                return {
+                    downloadUrl: directUrl,
+                    title: data.filename || data.text || 'KINGBOT Media Download'
+                };
+            }
+        } catch (_) {
+            clearTimeout(timer);
+        }
+    }
+    return null;
+}
+
+app.get('/health', (req, res) => {
+    res.json({ status: 'ok', uptime: process.uptime() });
+});
 
 app.post('/download', async (req, res) => {
-    const { url, type } = req.body; 
-    if (!url) return res.status(400).json({ success: false, error: 'URL is required' });
+    const { url, type = 'audio' } = req.body || {};
+    if (!url || typeof url !== 'string') {
+        return res.status(400).json({ success: false, error: 'URL is required' });
+    }
 
-    const fileId = Date.now();
-    const outputTemplate = `/tmp/${fileId}_%(id)s.%(ext)s`;
-
-    let downloadedFile = null;
-    let lastError = null;
-
+    const fileId = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     const cookiesFlag = fs.existsSync(cookiesPath) ? `--cookies "${cookiesPath}"` : '';
     const proxyFlag = process.env.PROXY_URL ? `--proxy "${process.env.PROXY_URL}"` : '';
 
+    let downloadedFile = null;
+    let lastError = '';
+
     try {
-        if (url.includes('youtube.com') || url.includes('youtu.be')) {
-            console.log("⚡ [GOD-MODE] Processing YouTube extraction request...");
+        if (isYouTubeUrl(url)) {
+            const clientRotation = ['tv_downgraded', 'mweb', 'web_creator', 'android_vr'];
 
-            // --- STAGE 1: Public High-Speed Gateways ---
-            const gateways = [
-                'https://api.cobalt.tools/api/json',
-                'https://co.wuk.sh/api/json',
-                'https://co.projectlization.com/api/json'
-            ];
-
-            let successUrl = null;
-            let mediaTitle = 'KINGBOT Media Download';
-
-            for (const gateway of gateways) {
+            for (const client of clientRotation) {
                 try {
-                    const apiRes = await fetchWithTimeout(gateway, {
-                        method: 'POST',
-                        headers: { 'Accept': 'application/json', 'Content-Type': 'application/json', 'User-Agent': 'Mozilla/5.0' },
-                        body: JSON.stringify({ url: url, isAudioOnly: type === 'audio' })
-                    }, { timeout: 2500 });
-                    
-                    const apiData = await apiRes.json();
-                    const directUrl = apiData.url || (apiData.picker && apiData.picker[0]?.url);
-                    if (directUrl) {
-                        successUrl = directUrl;
-                        mediaTitle = apiData.filename || apiData.text || mediaTitle;
-                        console.log(`🚀 [GATEWAY SUCCESS] Resolved via: ${gateway}`);
-                        break;
-                    }
-                } catch (e) {}
-            }
-
-            if (successUrl) {
-                return res.json({ success: true, title: mediaTitle, downloadUrl: successUrl });
-            }
-
-            // --- STAGE 2: Exhaustive Local yt-dlp Client Disguise & Impersonation Matrix ---
-            console.log("🔄 Gateways busy. Deploying local yt-dlp client disguise army...");
-            const clientStrategies = [
-                { client: 'android', skip: 'webpage' },
-                { client: 'ios', skip: 'configs,js' },
-                { client: 'tv_embedded', skip: '' },
-                { client: 'mweb', skip: '' },
-                { client: 'web', skip: '' }
-            ];
-
-            for (const strat of clientStrategies) {
-                try {
-                    const skipArg = strat.skip ? `,player_skip=${strat.skip}` : '';
-                    let dlCmd = type === 'audio' 
-                        ? `yt-dlp ${cookiesFlag} ${proxyFlag} --impersonate chrome --extractor-args "youtube:player_client=${strat.client}${skipArg}" -x --audio-format mp3 -o "${outputTemplate}" --no-check-certificates --geo-bypass "${url}"`
-                        : `yt-dlp ${cookiesFlag} ${proxyFlag} --impersonate chrome --extractor-args "youtube:player_client=${strat.client}${skipArg}" -f "best[ext=mp4]/best/b" -o "${outputTemplate}" --no-check-certificates --geo-bypass "${url}"`;
-
-                    console.log(`🎯 [CLIENT MATRIX] Trying client disguise: ${strat.client}`);
-                    await execPromise(dlCmd, { maxBuffer: 1024 * 1024 * 50 });
-
-                    const files = fs.readdirSync('/tmp');
-                    downloadedFile = files.find(f => f.startsWith(`${fileId}_`));
-
-                    if (downloadedFile) {
-                        console.log(`👑 [SUCCESS] Breakthrough achieved using client: ${strat.client}`);
-                        break;
-                    }
-                } catch (stratErr) {
-                    lastError = stratErr.stderr || stratErr.message;
+                    downloadedFile = await runYtDlp({
+                        url,
+                        type,
+                        fileId,
+                        cookiesFlag,
+                        proxyFlag,
+                        playerClient: client
+                    });
+                    if (downloadedFile) break;
+                } catch (err) {
+                    lastError = err.stderr || err.message || String(err);
                 }
             }
 
+            if (!downloadedFile) {
+                const mirrorResult = await tryExternalMirrors(url, type);
+                if (mirrorResult) {
+                    return res.json({
+                        success: true,
+                        title: mirrorResult.title,
+                        downloadUrl: mirrorResult.downloadUrl
+                    });
+                }
+            }
         } else {
-            // --- STAGE 3: Universal Engine for Audiomack, Instagram, Facebook, TikTok, etc. ---
-            console.log("📥 [UNIVERSAL ENGINE] Processing cross-platform media download...");
-            let dlCmd = type === 'audio'
-                ? `yt-dlp ${cookiesFlag} ${proxyFlag} -x --audio-format mp3 -o "${outputTemplate}" --no-check-certificates "${url}"`
-                : `yt-dlp ${cookiesFlag} ${proxyFlag} -f "best[ext=mp4]/best/b" -o "${outputTemplate}" --no-check-certificates "${url}"`;
-
-            await execPromise(dlCmd, { maxBuffer: 1024 * 1024 * 50 });
-
-            const files = fs.readdirSync('/tmp');
-            downloadedFile = files.find(f => f.startsWith(`${fileId}_`));
+            // Audiomack, Instagram, Facebook, TikTok, SoundCloud, etc.
+            try {
+                downloadedFile = await runYtDlp({
+                    url,
+                    type,
+                    fileId,
+                    cookiesFlag,
+                    proxyFlag
+                });
+            } catch (err) {
+                lastError = err.stderr || err.message || String(err);
+                const mirrorResult = await tryExternalMirrors(url, type);
+                if (mirrorResult) {
+                    return res.json({
+                        success: true,
+                        title: mirrorResult.title,
+                        downloadUrl: mirrorResult.downloadUrl
+                    });
+                }
+            }
         }
 
-    } catch (err) {
-        lastError = err.stderr || err.message || String(err);
-        console.error("Downloader execution error:", lastError);
-    }
+        if (!downloadedFile) {
+            return res.status(200).json({
+                success: false,
+                error: type === 'video'
+                    ? 'Failed to extract direct video stream.'
+                    : 'Failed to extract direct audio stream.',
+                details: lastError.slice(-300)
+            });
+        }
 
-    if (!downloadedFile) {
-        return res.json({ 
-            success: false, 
-            error: `Failed to extract direct stream. Please try again.` 
+        const protocol = req.headers['x-forwarded-proto'] || req.protocol;
+        const host = req.get('host');
+        const downloadUrl = `${protocol}://${host}/media/${encodeURIComponent(downloadedFile)}`;
+
+        return res.json({
+            success: true,
+            title: 'KINGBOT Media Download',
+            downloadUrl
+        });
+    } catch (err) {
+        console.error('Unexpected /download error:', err);
+        return res.status(200).json({
+            success: false,
+            error: type === 'video'
+                ? 'Failed to extract direct video stream.'
+                : 'Failed to extract direct audio stream.'
         });
     }
-
-    const host = req.get('host');
-    const protocol = req.protocol;
-    const downloadUrl = `${protocol}://${host}/media/${downloadedFile}`;
-
-    res.json({
-        success: true,
-        title: 'KINGBOT Media Download',
-        downloadUrl: downloadUrl
-    });
 });
 
 app.get('/search', async (req, res) => {
-    const query = req.query.q;
-    if (!query) return res.status(400).json({ success: false, error: 'Query is required' });
+    const query = (req.query.q || '').trim();
+    if (!query) {
+        return res.status(400).json({ success: false, error: 'Query is required' });
+    }
 
     try {
         const searchResult = await yts(query);
-        const video = searchResult.videos[0];
-        if (!video) return res.status(404).json({ success: false, error: 'No results found' });
+        const video = searchResult.videos && searchResult.videos[0];
+        if (!video) {
+            return res.status(404).json({ success: false, error: 'No results found' });
+        }
 
-        res.json({
+        return res.json({
             success: true,
             title: video.title,
             url: video.url,
@@ -182,8 +245,10 @@ app.get('/search', async (req, res) => {
             duration: video.timestamp
         });
     } catch (err) {
-        res.status(500).json({ success: false, error: err.message });
+        return res.status(500).json({ success: false, error: err.message });
     }
 });
 
-app.listen(PORT, () => console.log(`Kingbot Empowered API running on port ${PORT}`));
+app.listen(PORT, () => {
+    console.log(`KINGBOT-API running on port ${PORT}`);
+});

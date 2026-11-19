@@ -6,6 +6,9 @@ RUN apt-get -o Acquire::ForceIPv4=true update && \
     apt-get -o Acquire::ForceIPv4=true install -y --no-install-recommends \
     python3 \
     python3-pip \
+    python3-dev \
+    build-essential \
+    libcurl4-openssl-dev \
     curl \
     ca-certificates \
     ffmpeg \
@@ -16,8 +19,8 @@ RUN apt-get -o Acquire::ForceIPv4=true update && \
 RUN curl -fsSL https://deno.land/install.sh | sh
 ENV PATH="/root/.deno/bin:$PATH"
 
-# Install latest yt-dlp with EJS/challenge support
-RUN pip3 install --no-cache-dir --upgrade --break-system-packages "yt-dlp[default]"
+# Install yt-dlp with curl-cffi for browser TLS/JA3 impersonation
+RUN pip3 install --no-cache-dir --upgrade --break-system-packages "yt-dlp[default,curl-cffi]"
 
 WORKDIR /app
 

@@ -20,10 +20,11 @@ RUN apt-get -o Acquire::ForceIPv4=true update && \
 # Install Deno for yt-dlp JS challenge solving
 RUN curl -fsSL https://deno.land/install.sh | sh
 
-# Install yt-dlp nightly + curl-cffi + bgutil PO token provider plugin
+# Install yt-dlp + curl-cffi + bgutil PO token provider plugin, then switch yt-dlp to nightly
 RUN pip3 install --no-cache-dir --upgrade --break-system-packages \
-    "yt-dlp[default,curl-cffi] @ https://github.com/yt-dlp/yt-dlp-nightly-builds/archive/refs/heads/master.tar.gz" \
-    "bgutil-ytdlp-pot-provider"
+    "yt-dlp[default,curl-cffi]" \
+    "bgutil-ytdlp-pot-provider" && \
+    yt-dlp --update-to nightly || true
 
 # Build bgutil POT HTTP server so yt-dlp can generate per-video PO tokens locally
 RUN git clone --depth 1 https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git /opt/bgutil-provider && \

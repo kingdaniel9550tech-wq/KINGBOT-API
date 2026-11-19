@@ -60,16 +60,18 @@ function cleanupPrefixFiles(prefix) {
     } catch (_) {}
 }
 
-async function runYtDlp({ url, type, fileId, playerClient = null }) {
+async function runYtDlp({ url, type, fileId, playerClient = null, useImpersonate = true }) {
     const outputTemplate = path.join(TMP_DIR, `${fileId}_%(id)s.%(ext)s`);
     const args = [
         '--no-warnings',
         '--no-playlist',
         '--force-ipv4',
-        '--no-check-certificates',
-        '--remote-components',
-        'ejs:github'
+        '--no-check-certificates'
     ];
+
+    if (useImpersonate) {
+        args.push('--impersonate', 'chrome');
+    }
 
     if (fs.existsSync(cookiesPath)) {
         args.push('--cookies', cookiesPath);
@@ -176,16 +178,17 @@ app.post('/download', async (req, res) => {
 
     try {
         if (isYouTubeUrl(url)) {
-            const clientRotation = ['tv_downgraded', 'mweb', 'web_creator', 'android_vr'];
+            const clientRotation = ['mweb', 'web_creator', 'tv_downgraded', 'android_vr'];
 
             for (const client of clientRotation) {
                 try {
-                    console.log(`[YT-DLP TRY - ${client}] Attempting extraction...`);
+                    console.log(`[YT-DLP TRY - ${client} + chrome] Attempting extraction...`);
                     downloadedFile = await runYtDlp({
                         url,
                         type,
                         fileId,
-                        playerClient: client
+                        playerClient: client,
+                        useImpersonate: true
                     });
                     if (downloadedFile) {
                         console.log(`[YT-DLP SUCCESS - ${client}] Saved ${downloadedFile}`);
@@ -210,11 +213,12 @@ app.post('/download', async (req, res) => {
             }
         } else {
             try {
-                console.log('[YT-DLP TRY - universal] Attempting extraction...');
+                console.log('[YT-DLP TRY - universal + chrome] Attempting extraction...');
                 downloadedFile = await runYtDlp({
                     url,
                     type,
-                    fileId
+                    fileId,
+                    useImpersonate: true
                 });
                 if (downloadedFile) {
                     console.log(`[YT-DLP SUCCESS - universal] Saved ${downloadedFile}`);

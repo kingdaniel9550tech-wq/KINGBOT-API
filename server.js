@@ -23,8 +23,10 @@ const cookiesPath = path.join(TMP_DIR, 'cookies.txt');
 if (process.env.COOKIES_BASE64) {
     try {
         const decodedCookies = Buffer.from(process.env.COOKIES_BASE64, 'base64').toString('utf8');
-        fs.writeFileSync(cookiesPath, decodedCookies);
-        console.log('Cookies decoded and written to /tmp/cookies.txt');
+        if (decodedCookies.trim().length > 0) {
+            fs.writeFileSync(cookiesPath, decodedCookies);
+            console.log('Cookies decoded and written to /tmp/cookies.txt');
+        }
     } catch (err) {
         console.warn('Failed to decode COOKIES_BASE64:', err.message);
     }
@@ -60,24 +62,44 @@ function cleanupPrefixFiles(prefix) {
     } catch (_) {}
 }
 
-async function runYtDlp({ url, type, fileId, playerClient = null, useImpersonate = true }) {
+async function runYtDlp({
+    url,
+    type,
+    fileId,
+    playerClient = null,
+    useCookies = true,
+    useProxy = true,
+    useImpersonate = false
+}) {
     const outputTemplate = path.join(TMP_DIR, `${fileId}_%(id)s.%(ext)s`);
     const args = [
         '--no-warnings',
         '--no-playlist',
         '--force-ipv4',
-        '--no-check-certificates'
+        '--no-check-certificates',
+        '--remote-components',
+        'ejs:github',
+        '--retries',
+        '5',
+        '--retry-sleep',
+        'http:linear=1:4:1',
+        '--fragment-retries',
+        '5',
+        '--retry-sleep',
+        'fragment:linear=1:4:1',
+        '--extractor-args',
+        'youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416'
     ];
 
     if (useImpersonate) {
         args.push('--impersonate', 'chrome');
     }
 
-    if (fs.existsSync(cookiesPath)) {
+    if (useCookies && fs.existsSync(cookiesPath)) {
         args.push('--cookies', cookiesPath);
     }
 
-    if (process.env.PROXY_URL) {
+    if (useProxy && process.env.PROXY_URL) {
         args.push('--proxy', process.env.PROXY_URL);
     }
 
@@ -100,7 +122,7 @@ async function runYtDlp({ url, type, fileId, playerClient = null, useImpersonate
 
     await execFilePromise('yt-dlp', args, {
         maxBuffer: 1024 * 1024 * 64,
-        timeout: 90000
+        timeout: 120000
     });
 
     return findDownloadedFile(fileId);
@@ -178,26 +200,35 @@ app.post('/download', async (req, res) => {
 
     try {
         if (isYouTubeUrl(url)) {
-            const clientRotation = ['mweb', 'web_creator', 'tv_downgraded', 'android_vr'];
+            const attempts = [
+                { label: 'auto+cookies+proxy', playerClient: null, useCookies: true, useProxy: true, useImpersonate: false },
+                { label: 'mweb+cookies+proxy', playerClient: 'mweb', useCookies: true, useProxy: true, useImpersonate: false },
+                { label: 'mweb+no-cookies+proxy', playerClient: 'mweb', useCookies: false, useProxy: true, useImpersonate: false },
+                { label: 'web_creator+cookies+proxy', playerClient: 'web_creator', useCookies: true, useProxy: true, useImpersonate: false },
+                { label: 'tv_downgraded+cookies+proxy', playerClient: 'tv_downgraded', useCookies: true, useProxy: true, useImpersonate: false },
+                { label: 'auto+no-cookies+no-proxy', playerClient: null, useCookies: false, useProxy: false, useImpersonate: false }
+            ];
 
-            for (const client of clientRotation) {
+            for (const attempt of attempts) {
                 try {
-                    console.log(`[YT-DLP TRY - ${client} + chrome] Attempting extraction...`);
+                    console.log(`[YT-DLP TRY - ${attempt.label}] Attempting extraction...`);
                     downloadedFile = await runYtDlp({
                         url,
                         type,
                         fileId,
-                        playerClient: client,
-                        useImpersonate: true
+                        playerClient: attempt.playerClient,
+                        useCookies: attempt.useCookies,
+                        useProxy: attempt.useProxy,
+                        useImpersonate: attempt.useImpersonate
                     });
                     if (downloadedFile) {
-                        console.log(`[YT-DLP SUCCESS - ${client}] Saved ${downloadedFile}`);
+                        console.log(`[YT-DLP SUCCESS - ${attempt.label}] Saved ${downloadedFile}`);
                         break;
                     }
                 } catch (err) {
                     cleanupPrefixFiles(fileId);
                     lastError = (err.stderr || err.message || String(err)).trim();
-                    console.error(`[YT-DLP FAIL - ${client}]:`, lastError.slice(-500));
+                    console.error(`[YT-DLP FAIL - ${attempt.label}]:`, lastError.slice(-500));
                 }
             }
 
@@ -212,22 +243,34 @@ app.post('/download', async (req, res) => {
                 }
             }
         } else {
-            try {
-                console.log('[YT-DLP TRY - universal + chrome] Attempting extraction...');
-                downloadedFile = await runYtDlp({
-                    url,
-                    type,
-                    fileId,
-                    useImpersonate: true
-                });
-                if (downloadedFile) {
-                    console.log(`[YT-DLP SUCCESS - universal] Saved ${downloadedFile}`);
-                }
-            } catch (err) {
-                cleanupPrefixFiles(fileId);
-                lastError = (err.stderr || err.message || String(err)).trim();
-                console.error('[YT-DLP FAIL - universal]:', lastError.slice(-500));
+            const nonYtAttempts = [
+                { label: 'universal+impersonate', useImpersonate: true, useProxy: true },
+                { label: 'universal+no-impersonate', useImpersonate: false, useProxy: true }
+            ];
 
+            for (const attempt of nonYtAttempts) {
+                try {
+                    console.log(`[YT-DLP TRY - ${attempt.label}] Attempting extraction...`);
+                    downloadedFile = await runYtDlp({
+                        url,
+                        type,
+                        fileId,
+                        useCookies: false,
+                        useProxy: attempt.useProxy,
+                        useImpersonate: attempt.useImpersonate
+                    });
+                    if (downloadedFile) {
+                        console.log(`[YT-DLP SUCCESS - ${attempt.label}] Saved ${downloadedFile}`);
+                        break;
+                    }
+                } catch (err) {
+                    cleanupPrefixFiles(fileId);
+                    lastError = (err.stderr || err.message || String(err)).trim();
+                    console.error(`[YT-DLP FAIL - ${attempt.label}]:`, lastError.slice(-500));
+                }
+            }
+
+            if (!downloadedFile) {
                 const mirrorResult = await tryExternalMirrors(url, type);
                 if (mirrorResult) {
                     return res.json({

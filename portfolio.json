@@ -1,0 +1,10 @@
+{
+  "name": "King Daniel",
+  "tagline": "Developer, bot builder and creator",
+  "bio": "Edit this text in portfolio.json on GitHub. Tell visitors who you are, what you build and what you are working on.",
+  "skills": ["Node.js", "WhatsApp bots", "APIs", "Web design"],
+  "projects": [
+    { "title": "KINGBOT", "description": "A WhatsApp bot with premium commands, AI chat and a pairing website.", "link": "https://kingbot.devs.surf/" }
+  ],
+  "links": { "youtube": "", "whatsapp": "", "github": "", "email": "" }
+}

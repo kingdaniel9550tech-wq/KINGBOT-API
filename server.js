@@ -1,215 +1,367 @@
-// KINGBOT-API (Railway): fixed version.
-// Same endpoints as before:  POST /download {url, type}   GET /search?q=   GET /health
-// Fixes: cookies are no longer public, files are deleted automatically, optional API key, JS runtime for YouTube,
-//        smaller files, clear "YouTube is blocking this server" message, at most MAX_JOBS downloads at once.
+/**
+ * KING AI API
+ * One self-hosted AI endpoint for your bot. It rotates many API keys, falls back
+ * across providers automatically, and keeps short per-user chat memory.
+ * OpenAI-compatible, so it can replace Groq with a one-line URL change.
+ */
+require('dotenv').config();
 const express = require('express');
-const cors = require('cors');
-const { execFile } = require('child_process');
-const util = require('util');
-const execFilePromise = util.promisify(execFile);
-const yts = require('yt-search');
-const path = require('path');
-const fs = require('fs');
+const mount = require('./mount');
+const { createDownloader } = require('./downloader');
+const { createWorkerHub } = require('./worker');
+const { createTools } = require('./tools');
+const { createSite } = require('./site');
 
-const app = express();
 const PORT = process.env.PORT || 3000;
+// 0 means unlimited
+const num = (v, d) => { const n = Number(v === undefined || v === '' ? d : v); return n === 0 ? Infinity : n; };
+const TIMEOUT_MS = Number(process.env.REQUEST_TIMEOUT_MS || 120000); // self-hosted models can be slow
+const MAX_TOKENS_CAP = num(process.env.MAX_TOKENS_CAP, 1024);   // longest reply you allow
+const MAX_INPUT_CHARS = num(process.env.MAX_INPUT_CHARS, 4000); // longest question you allow
+const MAX_CONCURRENT = Number(process.env.MAX_CONCURRENT || 2);      // how many requests the model runs at once
+// Image analysis: used automatically whenever a request contains an image
+const MAX_IMAGE_MB = num(process.env.MAX_IMAGE_MB, 5);                 // biggest image you accept (0 = unlimited)
+const VISION_MODEL = process.env.VISION_MODEL || '@cf/meta/llama-3.2-11b-vision-instruct';
+const VISION_PROVIDER = process.env.VISION_PROVIDER || 'custom';       // which provider serves images
+const DEFAULT_SYSTEM =
+  process.env.DEFAULT_SYSTEM ||
+  'You are KING AI, a helpful, friendly assistant inside a WhatsApp bot. Keep answers clear and concise.';
 
-// Only this folder is public (/media). Cookies live OUTSIDE it, so they can never be downloaded.
-const MEDIA_DIR = process.env.MEDIA_DIR || '/tmp/media';
-const cookiesPath = path.join(path.dirname(MEDIA_DIR), 'cookies.txt');
-const MEDIA_TTL_MS = Number(process.env.MEDIA_TTL_MS || 20 * 60 * 1000); // files are deleted after 20 minutes
-const MAX_JOBS = Number(process.env.MAX_JOBS || 2);
-const JS_RUNTIME = process.env.JS_RUNTIME || 'node'; // YouTube needs a JavaScript runtime for yt-dlp
-const API_KEY = process.env.API_KEY || '';
-const BUDGET_MS = Number(process.env.DOWNLOAD_BUDGET_MS || 100000); // stop trying after this long
+const list = (v) =>
+  String(v || '')
+    .split(/[,\n]/)
+    .map((s) => s.trim())
+    .filter(Boolean);
 
-app.use(express.json());
-app.use(cors());
-
-fs.mkdirSync(MEDIA_DIR, { recursive: true });
-for (const f of fs.readdirSync(MEDIA_DIR)) { try { fs.rmSync(path.join(MEDIA_DIR, f), { force: true, recursive: true }); } catch {} } // start clean
-app.use('/media', express.static(MEDIA_DIR, { dotfiles: 'deny', index: false }));
-
-if (process.env.COOKIES_BASE64) {
-  try {
-    const decoded = Buffer.from(process.env.COOKIES_BASE64, 'base64').toString('utf8');
-    if (decoded.trim().length > 0) { fs.writeFileSync(cookiesPath, decoded, { mode: 0o600 }); console.log('Cookies loaded (kept private)'); }
-  } catch (err) { console.warn('Failed to decode COOKIES_BASE64:', err.message); }
-}
-
-if (!API_KEY) console.warn('[WARN] API_KEY is not set: anyone who knows this address can use your downloader. Set API_KEY in Railway.');
-function requireKey(req, res, next) {
-  if (!API_KEY) return next();
-  const given = (req.headers.authorization || '').replace(/^Bearer\s+/i, '') || req.headers['x-api-key'];
-  if (given === API_KEY) return next();
-  return res.status(401).json({ success: false, error: 'Invalid API key' });
-}
-
-const isYouTubeUrl = (url = '') => /https?:\/\/(www\.|m\.|music\.)?(youtube\.com|youtu\.be)\//i.test(url);
-const isAudiomackUrl = (url = '') => /https?:\/\/(www\.)?audiomack\.com\//i.test(url);
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-function findDownloadedFile(prefix) {
-  try {
-    const match = fs.readdirSync(MEDIA_DIR).find((f) => f.startsWith(`${prefix}_`) && !/\.(part|ytdl|temp)$/.test(f));
-    if (!match) return null;
-    return fs.statSync(path.join(MEDIA_DIR, match)).size > 1024 ? match : null;
-  } catch { return null; }
-}
-function cleanupPrefixFiles(prefix) {
-  try { for (const f of fs.readdirSync(MEDIA_DIR)) if (f.startsWith(`${prefix}_`)) fs.unlinkSync(path.join(MEDIA_DIR, f)); } catch {}
-}
-/** Deletes downloads older than MEDIA_TTL_MS so the disk never fills up. */
-function sweep(now = Date.now()) {
-  let removed = 0;
-  try {
-    for (const f of fs.readdirSync(MEDIA_DIR)) {
-      const p = path.join(MEDIA_DIR, f);
-      try { if (now - fs.statSync(p).mtimeMs > MEDIA_TTL_MS) { fs.rmSync(p, { force: true, recursive: true }); removed++; } } catch {}
+/* ---------------- Key pool with rotation + cooldown ---------------- */
+class KeyPool {
+  constructor(keys) {
+    this.keys = keys.map((k) => ({ k, until: 0 }));
+    this.i = 0;
+  }
+  size() { return this.keys.length; }
+  available() { return this.keys.filter((x) => x.until <= Date.now()).length; }
+  next() {
+    for (let n = 0; n < this.keys.length; n++) {
+      const slot = this.keys[this.i++ % this.keys.length];
+      if (slot.until <= Date.now()) return slot;
     }
-  } catch {}
-  return removed;
-}
-setInterval(sweep, 5 * 60 * 1000).unref();
-
-/** One short, honest sentence for the log and the reply. */
-function explain(text = '') {
-  if (/confirm you.?re not a bot/i.test(text)) return { reason: 'youtube_blocked', message: "YouTube is blocking this server's address (bot check). This host cannot download YouTube." };
-  if (/Private video|Video unavailable|has been removed/i.test(text)) return { reason: 'unavailable', message: 'That video is private or unavailable.' };
-  if (/Requested format is not available|n challenge|Only images are available/i.test(text)) return { reason: 'format', message: 'No usable format was found (the YouTube challenge solver may need a JavaScript runtime or a newer yt-dlp).' };
-  if (/HTTP Error 429|Too Many Requests/i.test(text)) return { reason: 'rate_limited', message: 'The site is rate limiting this server.' };
-  return { reason: 'failed', message: String(text).split('\n').filter(Boolean).pop() || 'Download failed.' };
+    return null;
+  }
+  report(slot, status, retryAfterSec) {
+    if (status === 429) slot.until = Date.now() + (retryAfterSec ? retryAfterSec * 1000 : 60000);
+    else if (status === 401 || status === 403) slot.until = Date.now() + 3600000;
+    else if (status >= 500 || !status) slot.until = Date.now() + 5000;
+  }
 }
 
-async function runYtDlp({ url, type, fileId, playerClient = null, useCookies = false, useProxy = false, useImpersonate = false, timeoutMs = 60000 }) {
-  const args = [
-    '--no-warnings', '--no-playlist', '--force-ipv4', '--no-check-certificates',
-    '--js-runtimes', JS_RUNTIME, '--remote-components', 'ejs:github',
-    '--max-filesize', process.env.MAX_FILESIZE || '100M',
-    '--sleep-requests', '1', '--retries', '3', '--fragment-retries', '3',
-  ];
-  if (useImpersonate) args.push('--impersonate', 'chrome');
-  if (useCookies && fs.existsSync(cookiesPath)) args.push('--cookies', cookiesPath);
-  if (useProxy && process.env.PROXY_URL) args.push('--proxy', process.env.PROXY_URL);
-  if (playerClient) args.push('--extractor-args', `youtube:player_client=${playerClient}`);
-  if (type === 'audio') args.push('-x', '--audio-format', 'mp3', '--audio-quality', '0');
-  else args.push('-f', 'bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best[height<=720]/best', '--merge-output-format', 'mp4');
-  args.push('-o', path.join(MEDIA_DIR, `${fileId}_%(id)s.%(ext)s`), url);
-  await execFilePromise('yt-dlp', args, { maxBuffer: 1024 * 1024 * 64, timeout: timeoutMs });
-  return findDownloadedFile(fileId);
-}
+/* ---------------- Providers (all OpenAI-compatible) ---------------- */
+// Model names change over time. Override any of them in .env (e.g. GROQ_MODEL=...).
+const PROVIDER_DEFS = {
+  groq: {
+    url: 'https://api.groq.com/openai/v1/chat/completions',
+    model: 'llama-3.3-70b-versatile',
+  },
+  gemini: {
+    url: 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions',
+    model: 'gemini-2.5-flash',
+  },
+  cerebras: {
+    url: 'https://api.cerebras.ai/v1/chat/completions',
+    model: 'llama-3.3-70b',
+  },
+  openrouter: {
+    url: 'https://openrouter.ai/api/v1/chat/completions',
+    model: 'meta-llama/llama-3.3-70b-instruct:free',
+  },
+  mistral: {
+    url: 'https://api.mistral.ai/v1/chat/completions',
+    model: 'mistral-small-latest',
+  },
+  // YOUR OWN model running on your server (Ollama, llama.cpp, vLLM). No external key needed.
+  local: {
+    url: 'http://localhost:11434/v1/chat/completions',
+    model: 'qwen2.5:3b',
+    keyless: true,
+  },
+  // Any other OpenAI-compatible service: set CUSTOM_URL, CUSTOM_MODEL, CUSTOM_KEYS
+  custom: { url: process.env.CUSTOM_URL, model: 'default' },
+};
 
-async function tryAudiomackDirect(url, fileId) {
-  const headers = { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36', Accept: 'text/html,*/*;q=0.8', Referer: 'https://audiomack.com/' };
-  const res = await fetch(url, { headers, redirect: 'follow' });
-  if (!res.ok) throw new Error(`Audiomack page fetch failed with HTTP ${res.status}`);
-  const html = await res.text();
-  const found = [...html.matchAll(/https?:\/\/[^"'\\\s<>]+\.(?:mp3|m4a|aac|ogg)[^"'\\\s<>]*/gi)].map((m) => m[0].replace(/\\u002F/g, '/').replace(/\\\//g, '/'))[0];
-  if (!found) throw new Error('No direct audio stream URL found on Audiomack page');
-  const audioRes = await fetch(found, { headers });
-  if (!audioRes.ok) throw new Error(`Audiomack audio stream failed with HTTP ${audioRes.status}`);
-  const buffer = Buffer.from(await audioRes.arrayBuffer());
-  if (buffer.length < 1024) throw new Error('Audiomack audio payload too small');
-  const name = `${fileId}_audiomack.mp3`;
-  fs.writeFileSync(path.join(MEDIA_DIR, name), buffer);
-  return name;
-}
+const ORDER = list(process.env.PROVIDER_ORDER || 'local');
 
-/** Optional: a cobalt instance you run yourself or have a key for (COBALT_URL, COBALT_KEY). The old public mirrors no longer work. */
-async function tryCobalt(url, type) {
-  if (!process.env.COBALT_URL) return null;
+const providers = ORDER.map((name) => {
+  const def = PROVIDER_DEFS[name];
+  if (!def) return null;
+  const U = name.toUpperCase();
+  let keys = list(process.env[`${U}_KEYS`] || process.env[`${U}_KEY`]);
+  if (!keys.length && def.keyless) keys = ['none'];
+  if (!keys.length) return null;
+  return {
+    name,
+    url: process.env[`${U}_URL`] || def.url,
+    model: process.env[`${U}_MODEL`] || def.model,
+    pool: new KeyPool(keys),
+  };
+}).filter(Boolean);
+
+if (!providers.length) console.warn('[WARN] No provider keys found. Fill in .env first.');
+
+async function callProvider(p, slot, messages, opts) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
   try {
-    const headers = { Accept: 'application/json', 'Content-Type': 'application/json' };
-    if (process.env.COBALT_KEY) headers.Authorization = `Api-Key ${process.env.COBALT_KEY}`;
-    const res = await fetch(process.env.COBALT_URL.replace(/\/+$/, '') + '/', { method: 'POST', headers, body: JSON.stringify({ url, downloadMode: type === 'audio' ? 'audio' : 'auto' }), signal: AbortSignal.timeout(20000) });
-    if (!res.ok) return null;
+    const body = { model: opts.model || p.model, messages };
+    if (opts.temperature != null) body.temperature = opts.temperature;
+    if (opts.max_tokens != null) body.max_tokens = opts.max_tokens;
+    const res = await fetch(p.url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...(slot.k !== 'none' && { Authorization: `Bearer ${slot.k}` }) },
+      body: JSON.stringify(body),
+      signal: ctrl.signal,
+    });
+    if (!res.ok) {
+      const detail = (await res.text().catch(() => '')).slice(0, 200);
+      const err = new Error(`${p.name} HTTP ${res.status} ${detail}`);
+      err.status = res.status;
+      err.retryAfter = Number(res.headers.get('retry-after')) || 0;
+      throw err;
+    }
     const data = await res.json();
-    const direct = data.url || (Array.isArray(data.picker) && data.picker[0]?.url);
-    return direct ? { downloadUrl: direct, title: data.filename || 'KINGBOT Media Download' } : null;
-  } catch (err) { console.warn('[COBALT FAIL]', err.message); return null; }
+    const text = data?.choices?.[0]?.message?.content;
+    if (!text) throw Object.assign(new Error(`${p.name} empty reply`), { status: 502 });
+    return { text, usage: data.usage, model: data.model || body.model };
+  } finally {
+    clearTimeout(timer);
+  }
 }
-
-app.get('/', (req, res) => res.json({ status: 'online', service: 'KINGBOT-API', cookiesLoaded: fs.existsSync(cookiesPath), proxyConfigured: Boolean(process.env.PROXY_URL), keyProtected: Boolean(API_KEY) }));
-app.get('/health', (req, res) => res.json({ status: 'ok', uptime: process.uptime() }));
 
 let running = 0;
-app.post('/download', requireKey, async (req, res) => {
-  const { url, type = 'audio' } = req.body || {};
-  if (!url || typeof url !== 'string' || !/^https?:\/\//i.test(url)) return res.status(400).json({ success: false, error: 'A valid URL is required' });
-  if (running >= MAX_JOBS) return res.status(200).json({ success: false, error: 'The server is busy. Please try again in a moment.', reason: 'busy' });
-
+const waiting = [];
+async function withSlot(fn) {
+  if (running >= MAX_CONCURRENT) {
+    if (waiting.length >= Number(process.env.MAX_QUEUE || 20)) throw Object.assign(new Error('Server busy, try again shortly'), { status: 503 });
+    await new Promise((r) => waiting.push(r));
+  }
   running++;
-  const fileId = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-  const deadline = Date.now() + BUDGET_MS;
-  let downloaded = null;
-  let lastError = '';
-  const fail = (extra = {}) => res.status(200).json({ success: false, error: type === 'video' ? 'Failed to extract direct video stream.' : 'Failed to extract direct audio stream.', ...extra });
+  try { return await fn(); } finally { running--; const nxt = waiting.shift(); if (nxt) nxt(); }
+}
 
-  try {
-    console.log(`[DOWNLOAD REQUEST] type=${type} url=${url}`);
-    const hasCookies = fs.existsSync(cookiesPath);
-    const hasProxy = Boolean(process.env.PROXY_URL);
-    const attempts = isYouTubeUrl(url)
-      ? [
-          { label: 'default', playerClient: null },
-          ...(hasCookies ? [{ label: 'cookies', playerClient: null, useCookies: true }] : []),
-          ...(hasProxy ? [{ label: 'mweb+proxy', playerClient: 'mweb', useProxy: true }, { label: 'web_embedded+proxy', playerClient: 'web_embedded', useProxy: true }] : []),
-        ]
-      : [
-          { label: 'direct+impersonate', useImpersonate: true },
-          { label: 'direct', useImpersonate: false },
-          ...(hasProxy ? [{ label: 'proxy', useProxy: true }] : []),
-        ];
+const hasImage = (messages) => messages.some((m) => Array.isArray(m.content) && m.content.some((c) => c && c.type === 'image_url'));
+const textLen = (m) => Array.isArray(m.content)
+  ? m.content.reduce((n, c) => n + (c && c.type === 'text' ? String(c.text || '').length : 0), 0)
+  : String(m.content || '').length;
+const imageMB = (messages) => messages.reduce((n, m) => n + (Array.isArray(m.content)
+  ? m.content.reduce((k, c) => k + (c && c.type === 'image_url' ? String(c.image_url?.url || '').length * 0.75 / 1048576 : 0), 0) : 0), 0);
 
-    for (const attempt of attempts) {
-      const left = deadline - Date.now();
-      if (left < 5000) break;
+function complete(messages, opts = {}) {
+  const total = messages.reduce((n, m) => n + textLen(m), 0);
+  if (total > MAX_INPUT_CHARS * 3) throw Object.assign(new Error('Input too long'), { status: 413 });
+  if (hasImage(messages)) {
+    if (imageMB(messages) > MAX_IMAGE_MB) throw Object.assign(new Error(`Image too large (max ${MAX_IMAGE_MB} MB)`), { status: 413 });
+    opts.vision = true;
+    if (!opts.model) opts.model = VISION_MODEL;
+  }
+  const mt = Math.min(Number(opts.max_tokens) || MAX_TOKENS_CAP, MAX_TOKENS_CAP);
+  opts.max_tokens = Number.isFinite(mt) ? mt : undefined;
+  return withSlot(() => completeInner(messages, opts));
+}
+
+async function completeInner(messages, opts = {}) {
+  const errors = [];
+  const chain = opts.vision ? providers.filter((p) => p.name === VISION_PROVIDER)
+    : opts.provider ? providers.filter((p) => p.name === opts.provider) : providers;
+  for (const p of chain) {
+    const tries = Math.min(p.pool.size(), 4);
+    for (let i = 0; i < tries; i++) {
+      const slot = p.pool.next();
+      if (!slot) break;
       try {
-        console.log(`[YT-DLP TRY - ${attempt.label}]`);
-        downloaded = await runYtDlp({ url, type, fileId, ...attempt, timeoutMs: Math.min(60000, left) });
-        if (downloaded) { console.log(`[YT-DLP SUCCESS - ${attempt.label}] ${downloaded}`); break; }
-      } catch (err) {
-        cleanupPrefixFiles(fileId);
-        lastError = (err.stderr || err.message || String(err)).trim();
-        const why = explain(lastError);
-        console.error(`[YT-DLP FAIL - ${attempt.label}] ${why.reason}: ${lastError.slice(-300)}`);
-        if (why.reason === 'youtube_blocked' && !hasProxy && !hasCookies) break; // nothing else to try on this host
-        if (why.reason === 'unavailable') break;                                // the video itself is the problem
-        await sleep(1000);
+        const r = await callProvider(p, slot, messages, opts);
+        return { ...r, provider: p.name };
+      } catch (e) {
+        p.pool.report(slot, e.status, e.retryAfter);
+        errors.push(e.name === 'AbortError' ? `${p.name} timeout` : e.message);
+        // 400-level errors other than auth/rate-limit are request problems: try next provider
+        if (e.status && e.status >= 400 && e.status < 500 && ![401, 403, 429].includes(e.status)) break;
       }
     }
+  }
+  const err = new Error('All providers failed: ' + (errors.join('; ') || 'no providers configured'));
+  err.status = 503;
+  throw err;
+}
 
-    if (!downloaded && isAudiomackUrl(url)) {
-      try { downloaded = await tryAudiomackDirect(url, fileId); } catch (err) { cleanupPrefixFiles(fileId); lastError = err.message; }
-    }
-    if (!downloaded) {
-      const cobalt = await tryCobalt(url, type);
-      if (cobalt) return res.json({ success: true, ...cobalt });
-    }
-    if (!downloaded) {
-      const why = explain(lastError);
-      return fail({ reason: why.reason, details: why.message });
-    }
+/* ---------------- Per-user memory ---------------- */
+const MEM_TURNS = Number(process.env.MEMORY_MESSAGES || 12);
+const MEM_TTL = Number(process.env.MEMORY_TTL_MIN || 60) * 60000;
+const memory = new Map(); // userId -> { msgs, t }
+setInterval(() => {
+  const now = Date.now();
+  for (const [k, v] of memory) if (now - v.t > MEM_TTL) memory.delete(k);
+}, 300000).unref();
 
-    const protocol = req.headers['x-forwarded-proto'] || req.protocol;
-    return res.json({ success: true, title: 'KINGBOT Media Download', downloadUrl: `${protocol}://${req.get('host')}/media/${encodeURIComponent(downloaded)}` });
-  } catch (err) {
-    cleanupPrefixFiles(fileId);
-    console.error('Unexpected /download error:', err);
-    return fail({ details: String(err.message || err).slice(-300) });
-  } finally { running--; }
+/* ---------------- App ---------------- */
+const app = express();
+const completeText = async (messages, opts) => (await complete(messages, opts)).text;
+const workerHub = createWorkerHub({ env: process.env });
+const downloader = createDownloader({ env: process.env, workerHub });
+const tools = createTools({ env: process.env, complete: completeText });
+const site = createSite({ env: process.env, complete: completeText });
+app.set('trust proxy', 1); // Render sits behind a proxy: needed to see each visitor's real IP
+
+// Public routes (your website calls these from the browser) need no API key; everything else does.
+const PUBLIC_PREFIXES = ['/tools', '/site', '/dl', '/worker']; // /worker is protected by WORKER_TOKEN instead
+const isPublicPath = (p) => PUBLIC_PREFIXES.some((x) => p === x || p.startsWith(x + '/'));
+
+const bigJson = express.json({ limit: process.env.JSON_LIMIT || '20mb' }); // images arrive as base64, so this must be large
+const smallJson = express.json({ limit: '60kb' });                          // public routes only get small bodies
+app.use((req, res, next) => (isPublicPath(req.path) ? smallJson : bigJson)(req, res, next));
+
+// KING_API_KEYS=keyA:30,keyB:100  (number = requests per minute for that key; default RATE_LIMIT)
+const API_KEYS = new Map(list(process.env.KING_API_KEYS).map((e) => { const [k, l] = e.split(':'); return [k, Number(l) || null]; }));
+if (!API_KEYS.size) console.warn('[WARN] KING_API_KEYS is empty: your API is open to anyone.');
+
+app.use((req, res, next) => {
+  if (req.path === '/' || req.path === '/health') return next();
+  const given = (req.headers.authorization || '').replace(/^Bearer\s+/i, '') || req.headers['x-api-key'] || req.query.key;
+  if (!API_KEYS.size) req.apiKey = given || 'open'; // no keys configured: open server (a warning was printed)
+  else if (API_KEYS.has(given)) req.apiKey = given;
+  if (!req.apiKey && !isPublicPath(req.path)) return res.status(401).json({ error: 'Invalid API key' });
+  next();
 });
 
-app.get('/search', requireKey, async (req, res) => {
-  const query = (req.query.q || '').trim();
-  if (!query) return res.status(400).json({ success: false, error: 'Query is required' });
+// Simple rate limit: RATE_LIMIT requests per minute per caller
+const RATE = num(process.env.RATE_LIMIT, 60);
+const USER_RATE = num(process.env.USER_RATE_LIMIT, 10); // per WhatsApp user per minute on /ask
+const userHits = new Map();
+setInterval(() => userHits.clear(), 60000).unref();
+const hits = new Map();
+setInterval(() => hits.clear(), 60000).unref();
+app.use((req, res, next) => {
+  if (isPublicPath(req.path)) return next(); // public routes have their own per-visitor limit (PUBLIC_RATE)
+  const id = req.apiKey || req.ip;
+  const n = (hits.get(id) || 0) + 1;
+  hits.set(id, n);
+  if (n > (API_KEYS.get(req.apiKey) || RATE)) return res.status(429).json({ error: 'Rate limit exceeded, slow down' });
+  next();
+});
+
+app.get('/', (_, res) => res.json({ name: 'KING AI API', status: 'online' }));
+
+app.get('/health', (_, res) =>
+  res.json({
+    status: 'ok',
+    uptime: Math.round(process.uptime()),
+    providers: providers.map((p) => ({ name: p.name, model: p.model, keys: p.pool.size(), ready: p.pool.available() })),
+    modules: { download: downloader.status().filter((d) => d.enabled).map((d) => d.name), worker: workerHub.status().online, tools: true, site: true },
+  })
+);
+
+// Simple endpoint for the bot: GET /ask?q=hello&user=2348012345678  or POST {q, user, system}
+async function ask(req, res) {
+  const src = req.method === 'GET' ? req.query : req.body || {};
+  const q = String(src.q || src.text || '').trim();
+  if (!q) return res.status(400).json({ error: 'Missing q' });
+  const user = String(src.user || 'anon');
+  const uh = (userHits.get(user) || 0) + 1;
+  userHits.set(user, uh);
+  if (uh > USER_RATE) return res.status(429).json({ error: 'You are sending too many requests, wait a minute' });
+  if (q.length > MAX_INPUT_CHARS) return res.status(413).json({ error: `Question too long (max ${MAX_INPUT_CHARS} chars)` });
+  const system = src.system || DEFAULT_SYSTEM;
+  const mem = memory.get(user) || { msgs: [], t: 0 };
+  const messages = [{ role: 'system', content: system }, ...mem.msgs, { role: 'user', content: q }];
   try {
-    const video = (await yts(query)).videos?.[0];
-    if (!video) return res.status(404).json({ success: false, error: 'No results found' });
-    return res.json({ success: true, title: video.title, url: video.url, thumbnail: video.thumbnail, duration: video.timestamp });
-  } catch (err) { return res.status(500).json({ success: false, error: err.message }); }
+    const r = await complete(messages, { provider: src.provider, model: src.model });
+    mem.msgs.push({ role: 'user', content: q }, { role: 'assistant', content: r.text });
+    mem.msgs = mem.msgs.slice(-MEM_TURNS);
+    mem.t = Date.now();
+    memory.set(user, mem);
+    res.json({ reply: r.text, provider: r.provider, model: r.model });
+  } catch (e) {
+    res.status(e.status || 500).json({ error: e.message });
+  }
+}
+app.get('/ask', ask);
+app.post('/ask', ask);
+
+app.post('/reset', (req, res) => {
+  memory.delete(String((req.body || {}).user || 'anon'));
+  res.json({ ok: true });
 });
 
-app.listen(PORT, () => console.log(`KINGBOT-API running on port ${PORT}`));
+// Image analysis: POST { image: <base64 or data URL>, mime?, q?, user?, system? }
+app.post('/vision', async (req, res) => {
+  const src = req.body || {};
+  let img = String(src.image || '').trim();
+  if (!img) return res.status(400).json({ error: 'Missing image (base64 or data URL)' });
+  if (!img.startsWith('data:')) img = `data:${src.mime || 'image/jpeg'};base64,${img}`;
+  const q = String(src.q || 'Describe this image in detail. If it contains any text, read the text out.').trim();
+  const user = String(src.user || 'anon');
+  const uh = (userHits.get(user) || 0) + 1;
+  userHits.set(user, uh);
+  if (uh > USER_RATE) return res.status(429).json({ error: 'You are sending too many requests, wait a minute' });
+  const messages = [
+    { role: 'system', content: src.system || DEFAULT_SYSTEM },
+    { role: 'user', content: [{ type: 'text', text: q }, { type: 'image_url', image_url: { url: img } }] },
+  ];
+  try {
+    const r = await complete(messages, {});
+    res.json({ reply: r.text, provider: r.provider, model: r.model });
+  } catch (e) {
+    res.status(e.status || 500).json({ error: e.message });
+  }
+});
 
-module.exports = { app, sweep, MEDIA_DIR, cookiesPath };
+// Speech-to-text (Cloudflare Whisper): POST { audio: <base64>, language? } -> { text }
+const WHISPER_MODEL = process.env.WHISPER_MODEL || '@cf/openai/whisper-large-v3-turbo';
+app.post('/transcribe', async (req, res) => {
+  const src = req.body || {};
+  if (!src.audio) return res.status(400).json({ error: 'Missing audio (base64)' });
+  const p = providers.find((x) => x.name === VISION_PROVIDER);
+  const runBase = process.env.CF_RUN_URL || String(p?.url || '').replace(/\/ai\/v1\/chat\/completions.*$/, '/ai/run/');
+  const slot = p && p.pool.next();
+  if (!p || !slot || !runBase.includes('/ai/run/')) return res.status(503).json({ error: 'Speech-to-text needs the Cloudflare provider (custom)' });
+  try {
+    const r = await fetch(runBase + WHISPER_MODEL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${slot.k}` },
+      body: JSON.stringify({ audio: src.audio, ...(src.language ? { language: src.language } : {}) }),
+      signal: AbortSignal.timeout(TIMEOUT_MS),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok || data.success === false) {
+      p.pool.report(slot, r.status);
+      return res.status(r.status >= 400 ? r.status : 502).json({ error: `transcribe HTTP ${r.status} ${JSON.stringify(data.errors || data).slice(0, 200)}` });
+    }
+    res.json({ text: String(data.result?.text ?? data.text ?? '').trim() });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// OpenAI-compatible endpoint (drop-in for Groq / OpenAI SDKs)
+app.post('/v1/chat/completions', async (req, res) => {
+  const { messages, temperature, max_tokens, model } = req.body || {};
+  if (!Array.isArray(messages) || !messages.length) return res.status(400).json({ error: 'messages required' });
+  try {
+    // "model" can be "auto" (default) or a provider name like "groq" / "gemini"
+    const provider = providers.some((p) => p.name === model) ? model : undefined;
+    const r = await complete(messages, { temperature, max_tokens, provider });
+    res.json({
+      id: 'chatcmpl-' + Date.now(),
+      object: 'chat.completion',
+      created: Math.floor(Date.now() / 1000),
+      model: r.model,
+      choices: [{ index: 0, message: { role: 'assistant', content: r.text }, finish_reason: 'stop' }],
+      usage: r.usage || {},
+    });
+  } catch (e) {
+    res.status(e.status || 500).json({ error: { message: e.message } });
+  }
+});
+
+// ---- extra modules: downloader, tools pack, website backend (each lives in its own file)
+mount(app, [...downloader.routes, ...workerHub.routes, ...tools.routes, ...site.routes], { env: process.env });
+
+app.listen(PORT, () => console.log(`KING AI API running on :${PORT} with providers: ${providers.map((p) => p.name).join(', ') || 'none'}`));

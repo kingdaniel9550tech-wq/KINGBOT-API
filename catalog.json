@@ -1,0 +1,6 @@
+{
+  "items": [
+    { "id": "v1", "type": "video", "title": "Sample video (replace me)", "description": "Put a link to a video file or stream you own.", "url": "https://example.com/video.mp4", "thumbnail": "", "duration": 0, "tags": ["sample"] },
+    { "id": "m1", "type": "music", "title": "Sample track (replace me)", "artist": "King Daniel", "url": "https://example.com/track.mp3", "thumbnail": "", "duration": 0, "tags": ["sample"] }
+  ]
+}

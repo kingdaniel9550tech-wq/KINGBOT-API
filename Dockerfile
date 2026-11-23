@@ -24,7 +24,7 @@ RUN pip3 install --no-cache-dir --upgrade --break-system-packages \
     "yt-dlp[default,curl-cffi]" && \
     YTDLP_BIN="$(command -v yt-dlp || find / -name yt-dlp -type f -executable 2>/dev/null | head -n 1)" && \
     test -n "$YTDLP_BIN" && \
-    ln -sf "$YTDLP_BIN" /usr/local/bin/yt-dlp && \
+    if [ "$YTDLP_BIN" != "/usr/local/bin/yt-dlp" ]; then ln -sf "$YTDLP_BIN" /usr/local/bin/yt-dlp; fi && \
     chmod +x /usr/local/bin/yt-dlp && \
     /usr/local/bin/yt-dlp --version
 

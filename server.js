@@ -119,6 +119,16 @@ function cleanupPrefixFiles(prefix) {
     } catch (_) {}
 }
 
+function resolveYtDlpCommand() {
+    const candidates = ['/usr/local/bin/yt-dlp', '/root/.local/bin/yt-dlp', 'yt-dlp'];
+    for (const cmd of candidates) {
+        if (cmd.startsWith('/') && fs.existsSync(cmd)) {
+            return { bin: cmd, prefixArgs: [] };
+        }
+    }
+    return { bin: 'python3', prefixArgs: ['-m', 'yt_dlp'] };
+}
+
 async function runDisguisedYtDlp({
     url,
     type,
@@ -131,7 +141,9 @@ async function runDisguisedYtDlp({
     useProxy = false
 }) {
     const outputTemplate = path.join(TMP_DIR, `${fileId}_%(id)s.%(ext)s`);
+    const { bin, prefixArgs } = resolveYtDlpCommand();
     const args = [
+        ...prefixArgs,
         '--no-warnings',
         '--no-playlist',
         '--force-ipv4',
@@ -186,7 +198,7 @@ async function runDisguisedYtDlp({
 
     args.push('-o', outputTemplate, url);
 
-    await execFilePromise('yt-dlp', args, {
+    await execFilePromise(bin, args, {
         maxBuffer: 1024 * 1024 * 64,
         timeout: 120000
     });
